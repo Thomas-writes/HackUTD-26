@@ -1,0 +1,8 @@
+{
+  "dev": {
+    "run": "npm run dev"
+  },
+  "server": "maincloud",
+  "database": "my-spacetime-app-m8ndx",
+  "module-path": "./spacetimedb"
+}
