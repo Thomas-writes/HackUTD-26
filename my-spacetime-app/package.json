@@ -10,19 +10,23 @@
     "generate": "cargo run -p gen-bindings -- --out-dir src/module_bindings --module-path spacetimedb && prettier --write src/module_bindings",
     "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path spacetimedb",
     "spacetime:publish:local": "spacetime publish --module-path server --server local",
-    "spacetime:publish": "spacetime publish --module-path server --server maincloud"
+    "spacetime:publish": "spacetime publish --module-path server --server maincloud",
+    "test": "vitest"
   },
   "dependencies": {
-    "spacetimedb": "2.14.*",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "rxjs": "^7.8.2",
+    "spacetimedb": "2.14.*"
   },
   "devDependencies": {
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^5.0.2",
+    "jsdom": "^31.0.0",
     "typescript": "~5.6.2",
-    "vite": "^7.1.5"
+    "vite": "^7.3.7",
+    "vitest": "^5.1.0"
   },
   "engines": {
     "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
