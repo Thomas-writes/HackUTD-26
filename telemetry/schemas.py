@@ -32,7 +32,10 @@ NonNegative = Annotated[float, Field(ge=0, le=1e12)]
 Classification = Literal[
     "healthy", "heavy_writes", "drive_fault", "warming_up"
 ]
-DEMO_NODE_COUNTS = (1, 10, 100, 500, 1_000, 2_500, 5_000, 10_000)
+MAX_DEMO_NODES = 1_000
+DEMO_DRIVES_PER_NODE = 10
+DEMO_NODE_COUNTS = (1, 10, 100, 500, MAX_DEMO_NODES)
+ACTIVE_DEMO_ACTION_STATES = ("pending", "applied")
 #Labels the ML model itself can output
 #"warming_up" is excluded because it means "not enough data yet"
 #which is decided outside the model

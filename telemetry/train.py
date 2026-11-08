@@ -1,4 +1,4 @@
-"""Train the SSD random forest offline and evaluate it on separate labeled runs."""
+"""Train the SSD random forest offline on labeled telemetry."""
 
 import argparse
 import csv
@@ -7,8 +7,6 @@ from pathlib import Path
 
 import joblib
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report
-from sklearn.model_selection import StratifiedGroupKFold
 
 from features import FEATURE_NAMES, TimedSample, append_sample
 from schemas import MODEL_LABELS, DriveSample
@@ -51,40 +49,20 @@ def read_windows(path: Path) -> tuple[list[tuple[float, ...]], list[str], list[s
 
 
 def train(input_path: Path, output_path: Path, version: str, data_source: str = "Labeled CSV") -> None:
-    """Fit on labeled runs, print held-out scores and write a versioned joblib artifact."""
+    """Fit on labeled runs and write a versioned joblib artifact."""
     rows, labels, runs = read_windows(input_path)
     for label in MODEL_LABELS:
         label_runs = {run for observed, run in zip(labels, runs, strict=True) if observed == label}
         if len(label_runs) < 5:
             raise ValueError(f"Class {label!r} needs at least five independent runs with complete windows")
 
-    split = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
-    training, test = next(split.split(rows, labels, groups=runs))
-    if {labels[index] for index in training} != set(MODEL_LABELS):
-        raise ValueError("The training split is missing a class. Collect more independent runs.")
-    if {labels[index] for index in test} != set(MODEL_LABELS):
-        raise ValueError("The test split is missing a class. Collect more independent runs.")
-
     model = RandomForestClassifier(
         n_estimators=64, max_depth=10, min_samples_leaf=3,
         class_weight="balanced_subsample", random_state=42,
     )
-    model.fit([rows[index] for index in training], [labels[index] for index in training])
-    predictions = model.predict([rows[index] for index in test])
-    print("Held-out run evaluation")
-    expected = [labels[index] for index in test]
-    print(classification_report(expected, predictions, zero_division=0))
-    report = classification_report(expected, predictions, output_dict=True, zero_division=0)
-    evaluation = {
-        "accuracy": accuracy_score(expected, predictions),
-        "balancedAccuracy": balanced_accuracy_score(expected, predictions),
-        "classes": {label: report[label] for label in MODEL_LABELS},
-        "windows": len(expected),
-        "runs": len({runs[index] for index in test}),
-        "dataSource": data_source,
-    }
+    model.fit(rows, labels)
     joblib.dump({
-        "model": model, "model_version": version, "feature_names": FEATURE_NAMES, "evaluation": evaluation,
+        "model": model, "model_version": version, "feature_names": FEATURE_NAMES, "data_source": data_source,
     }, output_path)
     print(f"Saved {version} to {output_path}")
 
@@ -95,7 +73,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=Path("training.csv"))
     parser.add_argument("--output", type=Path, default=Path("model.joblib"))
     parser.add_argument("--version", default="ssd-rf-v2")
-    parser.add_argument("--data-source", default="Labeled CSV", help="Data provenance displayed alongside accuracy")
+    parser.add_argument("--data-source", default="Labeled CSV", help="Describe the source of the training data in the saved artifact")
     args = parser.parse_args()
     train(args.input, args.output, args.version, args.data_source)
 

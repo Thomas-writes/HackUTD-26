@@ -229,7 +229,7 @@ def main() -> None:
     parser.add_argument("--smart-interval", type=float, default=30, help="Seconds between SMART checks, 0 disables")
     parser.add_argument("--training-csv", type=Path, help="Append measured telemetry to a labeled training CSV")
     parser.add_argument("--label", choices=MODEL_LABELS, help="Ground truth for this controlled run")
-    parser.add_argument("--run-id", help="Independent run or drive identifier for evaluation splitting")
+    parser.add_argument("--run-id", help="Independent run or drive identifier for grouping training samples")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if not 0.1 <= args.interval <= 60 or not (math.isfinite(args.smart_interval) and args.smart_interval >= 0):

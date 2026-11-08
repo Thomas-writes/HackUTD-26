@@ -16,12 +16,17 @@ from urllib.parse import urljoin
 import aiohttp
 
 from features import WINDOW_MS
-from schemas import DEMO_NODE_COUNTS, MODEL_LABELS, DriveSample, TelemetryBatch
+from schemas import (
+    ACTIVE_DEMO_ACTION_STATES, DEMO_DRIVES_PER_NODE, DEMO_NODE_COUNTS, MAX_DEMO_NODES,
+    MODEL_LABELS, DriveSample, TelemetryBatch,
+)
 
 DEFAULT_API = "http://127.0.0.1:8000/telemetry"
 DriveProfile = tuple[str, float]
+DemoActions = dict[str, list[dict[str, str]]]
+DEMO_INTERVAL = 10
 BASE_INTERVAL = 3
-FAULT_SHARE = 0.10
+FAULT_SHARE = 0.25
 
 
 
@@ -157,18 +162,80 @@ async def post_batch(
         return (time.perf_counter() - start) * 1_000, Counter(), f"{type(exc).__name__}: {exc}", retry
 
 
+def route_writes(
+    readings: list[DriveSample], profiles: list[DriveProfile], actions: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Redistribute new writes within a node and return policies applied to this sample."""
+    if not actions:
+        return []
+    actions = [action for action in actions if action["state"] in ACTIVE_DEMO_ACTION_STATES]
+    if not actions:
+        return []
+    positions = {drive.drive_id: i for i, drive in enumerate(readings)}
+    targets = {action["driveId"] for action in actions}
+    quarantined = {action["driveId"] for action in actions if action["kind"] == "quarantine"}
+    receivers = [i for i, drive in enumerate(readings)
+                 if drive.drive_id not in targets and not drive.smart_critical_warning]
+    moved_rate = moved_iops = 0.0
+    applied = []
+    for action in sorted(actions, key=lambda item: item["kind"] != "quarantine"):
+        drive_id = action["driveId"]
+        if drive_id not in positions:
+            continue
+        i = positions[drive_id]
+        drive = readings[i]
+        quarantine = action["kind"] == "quarantine"
+        if not quarantine and (not receivers or drive_id in quarantined):
+            continue
+        rate = 0.0 if quarantine else min(drive.write_mib_per_sec, 60 * profiles[i][1])
+        iops = drive.write_iops * rate / drive.write_mib_per_sec if drive.write_mib_per_sec else 0.0
+        moved_rate += drive.write_mib_per_sec - rate
+        moved_iops += drive.write_iops - iops
+        readings[i] = drive.model_copy(update={
+            "write_mib_per_sec": rate, "write_iops": iops,
+            "read_latency_ms": drive.read_latency_ms if quarantine else min(drive.read_latency_ms or 0.0, 2.0),
+            "in_flight": min(drive.in_flight, round(2 * profiles[i][1])),
+            "write_latency_ms": None if quarantine else min(drive.write_latency_ms or 0.0, 2.0),
+            "queue_depth": min(drive.queue_depth, 2 * profiles[i][1]),
+            "smart_critical_warning": (drive.smart_critical_warning or 0) | 4 if quarantine else drive.smart_critical_warning,
+        })
+        applied.append(action)
+    for i in receivers:
+        drive = readings[i]
+        readings[i] = drive.model_copy(update={
+            "write_mib_per_sec": drive.write_mib_per_sec + moved_rate / len(receivers),
+            "write_iops": drive.write_iops + moved_iops / len(receivers),
+        })
+    return applied
+
+
+async def confirm_actions(client: aiohttp.ClientSession, url: str, actions: list[dict[str, str]]) -> None:
+    for action in actions:
+        if action["state"] != "pending":
+            continue
+        key = {field: action[field] for field in ("nodeId", "driveId", "kind", "actionId")}
+        try:
+            async with client.post(url, json=key, raise_for_status=True) as response:
+                action["state"] = (await response.json())["state"]
+        except (aiohttp.ClientError, TimeoutError):
+            pass  # Retry confirmation after the next successful telemetry batch.
+
+
 async def replay_node(
     client: aiohttp.ClientSession, args: argparse.Namespace, index: int, drives: list[DriveProfile],
-    start: float, epoch_ms: int, phase: float, stats: ReplayStats,
+    start: float, epoch_ms: int, phase: float, stats: ReplayStats, actions: DemoActions, first_tick: int = 0,
 ) -> None:
     """Replay one independently timed node and record its deliveries in the fleet totals."""
     rng = random.Random(args.seed + index)
     interval_ms = round(args.interval * 1_000)
     window_ticks = math.ceil(WINDOW_MS / interval_ms)
     incident_chance = 1 - (1 - args.failure_chance) ** (args.interval / BASE_INTERVAL)
-    ticks = range(math.ceil(args.seconds / args.interval)) if args.seconds else count()
+    ticks = range(math.ceil(args.seconds / args.interval)) if args.seconds else count(first_tick)
     token = os.getenv("TELEMETRY_TOKEN")
     scenario = NodeScenario()
+    node_id = f"sim-node-{index:04}"
+    affected_drive = drives[index % len(drives)][0]
+    confirm_url = urljoin(args.url, "/demo/actions/applied")
     errors: dict[str, int] = {}
     loop = asyncio.get_running_loop()
     for tick in ticks:
@@ -181,11 +248,13 @@ async def replay_node(
         if loop.time() >= scheduled + args.interval:
             stats.missed += 1
             continue
-        readings = [simulate_drive(rng, drive, scenario.label, load, errors.get(drive, 0))
+        readings = [simulate_drive(rng, drive, scenario.label if drive == affected_drive else "healthy",
+                                   load, errors.get(drive, 0))
                     for drive, load in drives]
         errors.update((reading.drive_id, int(reading.media_errors_total or 0)) for reading in readings)
+        applied = route_writes(readings, drives, actions.get(node_id, []))
         batch = TelemetryBatch(
-            node_id=f"sim-node-{index:04}", sample_time_ms=epoch_ms + round(offset * 1_000),
+            node_id=node_id, sample_time_ms=epoch_ms + round(offset * 1_000),
             interval_ms=interval_ms,
             drives=readings,
         )
@@ -198,16 +267,19 @@ async def replay_node(
             stats.accepted += 1
             stats.rtts.append(latency)
             stats.counts.update(labels)
+            if applied:
+                await confirm_actions(client, confirm_url, applied)
+
+
+def group_profiles(drives: int, drives_per_node: int, seed: int) -> list[list[DriveProfile]]:
+    rng = random.Random(seed)
+    profiles = [(f"ssd-{index:04}", rng.uniform(0.5, 2.8)) for index in range(drives)]
+    return [profiles[i:i + drives_per_node] for i in range(0, drives, drives_per_node)]
 
 
 async def replay(args: argparse.Namespace) -> int:
-    """Replay the configured logical nodes and print throughput, request latency and failures."""
-    rng = random.Random(args.seed)
-    profiles = [
-        (f"ssd-{index:04}", rng.uniform(0.5, 2.8))
-        for index in range(args.drives)
-    ]
-    groups = [profiles[i:i + args.drives_per_node] for i in range(0, len(profiles), args.drives_per_node)]
+    """Replay a fixed fleet and print throughput, request latency and failures."""
+    groups = group_profiles(args.drives, args.drives_per_node, args.seed)
     stats = ReplayStats()
     loop = asyncio.get_running_loop()
     print(f"Sending {args.drives:,} drive readings across {len(groups):,} "
@@ -222,7 +294,7 @@ async def replay(args: argparse.Namespace) -> int:
             async with asyncio.TaskGroup() as fleet:
                 for node, group in enumerate(groups):
                     phase = 0 if args.burst else node * args.interval / len(groups)
-                    fleet.create_task(replay_node(client, args, node, group, start, initial_sample_time, phase, stats))
+                    fleet.create_task(replay_node(client, args, node, group, start, initial_sample_time, phase, stats, {}))
                 while not args.seconds:
                     await asyncio.sleep(30)
                     stats.report(loop.time() - start)
@@ -233,22 +305,37 @@ async def replay(args: argparse.Namespace) -> int:
     return int(stats.failures > 0 or stats.missed > 0)
 
 
-def fleet_interval(nodes: int) -> int:
-    return min(12, max(BASE_INTERVAL, math.ceil(nodes * 12 / 10_000)))
-
-
 async def dashboard_replay(args: argparse.Namespace) -> int:
-    """Follow the local dashboard's requested fleet size until interrupted."""
+    """Resize the fleet while keeping each retained node's sampling clock and state."""
     control_url = urljoin(args.url, "/demo/fleet")
-    active_nodes = 0
-    replay_task: asyncio.Task[int] | None = None
+    actions_url = urljoin(args.url, "/demo/actions")
+    config = argparse.Namespace(**vars(args))
+    config.interval = DEMO_INTERVAL
+    groups = group_profiles(MAX_DEMO_NODES * DEMO_DRIVES_PER_NODE, DEMO_DRIVES_PER_NODE, args.seed)
+    actions: DemoActions = {}
+    tasks: list[asyncio.Task[None]] = []
+    stats = ReplayStats()
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    epoch_ms = time.time_ns() // 1_000_000
+    next_report = start + 30
     unavailable = False
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as client:
+    async with (
+        aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as controls,
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=200),
+                              timeout=aiohttp.ClientTimeout(total=15)) as client,
+        asyncio.TaskGroup() as fleet,
+    ):
         try:
             while True:
                 try:
-                    async with client.get(control_url, raise_for_status=True) as response:
+                    async with controls.get(control_url, raise_for_status=True) as response:
                         nodes = (await response.json())["nodes"]
+                    async with controls.get(actions_url, raise_for_status=True) as response:
+                        latest_actions = (await response.json())["actions"]
+                    actions.clear()
+                    for action in latest_actions:
+                        actions.setdefault(action["nodeId"], []).append(action)
                     unavailable = False
                 except (aiohttp.ClientError, TimeoutError):
                     if not unavailable:
@@ -256,22 +343,31 @@ async def dashboard_replay(args: argparse.Namespace) -> int:
                         unavailable = True
                     await asyncio.sleep(1)
                     continue
-                if nodes in DEMO_NODE_COUNTS and nodes != active_nodes:
-                    if replay_task is not None:
-                        replay_task.cancel()
-                        await asyncio.gather(replay_task, return_exceptions=True)
-                    config = argparse.Namespace(**vars(args))
-                    config.drives = nodes
-                    config.interval = fleet_interval(nodes)
-                    active_nodes = nodes
-                    replay_task = asyncio.create_task(replay(config))
-                if replay_task is not None and replay_task.done():
-                    return replay_task.result()
+
+                if nodes in DEMO_NODE_COUNTS and nodes != len(tasks):
+                    retired = tasks[nodes:]
+                    del tasks[nodes:]
+                    for task in retired:
+                        task.cancel()
+                    if retired:
+                        await asyncio.gather(*retired, return_exceptions=True)
+                    for node in range(len(tasks), nodes):
+                        # Spread even a small prefix of the fleet across the sampling interval.
+                        phase = (node * 619 % MAX_DEMO_NODES) * DEMO_INTERVAL / MAX_DEMO_NODES
+                        first_tick = max(0, math.ceil((loop.time() - start - phase) / DEMO_INTERVAL))
+                        tasks.append(fleet.create_task(replay_node(
+                            client, config, node, groups[node], start, epoch_ms, phase, stats, actions, first_tick,
+                        )))
+                    print(f"Monitoring {nodes:,} nodes with {DEMO_DRIVES_PER_NODE} SSDs each, "
+                          f"sampled every {DEMO_INTERVAL}s with a {config.failure_chance:.2%} incident chance "
+                          f"per eligible three seconds", flush=True)
+                if loop.time() >= next_report:
+                    stats.report(loop.time() - start)
+                    next_report = loop.time() + 30
                 await asyncio.sleep(1)
         finally:
-            if replay_task is not None:
-                replay_task.cancel()
-                await asyncio.gather(replay_task, return_exceptions=True)
+            for task in tasks:
+                task.cancel()
 
 
 def main() -> int:
@@ -282,14 +378,14 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--url", default=DEFAULT_API)
     fleet_size = parser.add_mutually_exclusive_group()
-    fleet_size.add_argument("--dashboard-control", action="store_true", help="Follow the local dashboard fleet size")
-    fleet_size.add_argument("--nodes", type=int, help="Number of nodes from 1 to 10,000 (default 1,000)")
+    fleet_size.add_argument("--dashboard-control", action="store_true", help="Follow the local dashboard fleet size with ten SSDs per node")
+    fleet_size.add_argument("--nodes", type=int, help=f"Number of nodes from 1 to {MAX_DEMO_NODES:,} (default {MAX_DEMO_NODES:,})")
     fleet_size.add_argument("--drives", type=int, help="Total drives for the legacy replay mode")
-    parser.add_argument("--drives-per-node", type=int, default=1)
-    parser.add_argument("--interval", type=float, help="Seconds between samples (default 3–12 based on fleet size)")
+    parser.add_argument("--drives-per-node", type=int, help="SSDs per node in fixed-size replay (default 1)")
+    parser.add_argument("--interval", type=float, help="Seconds between samples in fixed-size replay (default 3)")
     parser.add_argument("--seconds", type=float, default=0, help="Duration in seconds, 0 runs until interrupted")
-    parser.add_argument("--failure-chance", type=float, default=0.003,
-                        help="Probability of an incident starting per eligible three seconds (90%% heavy writes, 10%% faults)")
+    parser.add_argument("--failure-chance", type=float, default=0.10,
+                        help="Probability that an eligible node starts a heavy-write or drive-fault incident in three seconds")
     parser.add_argument("--burst", action="store_true", help="Start every node's sampling clock together")
     args = parser.parse_args()
     if args.training_csv:
@@ -298,20 +394,25 @@ def main() -> int:
         write_training_csv(args.training_csv, args.runs_per_class, args.seed)
         print(f"Wrote labeled synthetic runs to {args.training_csv}")
         return 0
-    if args.nodes is not None and not 1 <= args.nodes <= 10_000:
-        parser.error("Set nodes between 1 and 10,000")
+    if args.nodes is not None and not 1 <= args.nodes <= MAX_DEMO_NODES:
+        parser.error(f"Set nodes between 1 and {MAX_DEMO_NODES:,}")
+    if args.dashboard_control and args.drives_per_node not in (None, DEMO_DRIVES_PER_NODE):
+        parser.error("Dashboard control uses ten drives per node")
+    if args.drives_per_node is None:
+        args.drives_per_node = DEMO_DRIVES_PER_NODE if args.dashboard_control else 1
     if args.drives is None:
-        args.drives = (args.nodes or 1_000) * args.drives_per_node
+        args.drives = (args.nodes or MAX_DEMO_NODES) * args.drives_per_node
     if args.interval is None:
-        nodes = math.ceil(args.drives / max(1, args.drives_per_node))
-        args.interval = fleet_interval(nodes)
+        args.interval = BASE_INTERVAL
     if not (args.drives > 0 and 1 <= args.drives_per_node <= 2048 and 0.1 <= args.interval <= 60
             and math.isfinite(args.seconds) and args.seconds >= 0):
         parser.error("Set positive drives, nonnegative seconds, drives-per-node from 1 to 2048, interval from 0.1 to 60")
+    if math.ceil(args.drives / args.drives_per_node) > MAX_DEMO_NODES:
+        parser.error(f"Set at most {MAX_DEMO_NODES:,} nodes")
     if not 0 <= args.failure_chance <= 1:
         parser.error("Set failure-chance between 0 and 1")
-    if args.dashboard_control and (args.seconds or args.drives_per_node != 1):
-        parser.error("Dashboard control needs continuous replay with one drive per node")
+    if args.dashboard_control and args.seconds:
+        parser.error("Dashboard control needs continuous replay")
     try:
         return asyncio.run(dashboard_replay(args) if args.dashboard_control else replay(args))
     except KeyboardInterrupt:

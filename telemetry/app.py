@@ -5,19 +5,26 @@ import hmac
 import json
 import logging
 import os
+import re
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import uuid4
 
 import aiohttp
 import joblib
 import numpy as np
 from fastapi import Body, FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
 from sklearn.ensemble import RandomForestClassifier
 
 from features import FEATURE_NAMES, TimedSample, append_sample
-from schemas import DEMO_NODE_COUNTS, MODEL_LABELS, AssessmentBatch, DriveAssessment, TelemetryBatch
+from schemas import (
+    ACTIVE_DEMO_ACTION_STATES, DEMO_DRIVES_PER_NODE, DEMO_NODE_COUNTS, MAX_DEMO_NODES, MODEL_LABELS, AssessmentBatch,
+    DriveAssessment, DriveId, NodeId, TelemetryBatch,
+)
 
 LOGGER = logging.getLogger("uvicorn.error")
 DEFAULT_MODEL = Path(__file__).with_name("model.joblib")
@@ -29,7 +36,7 @@ NEXT_CHECK = {
 }
 
 
-def load_model(path: Path) -> tuple[RandomForestClassifier, str, dict | None]:
+def load_model(path: Path) -> tuple[RandomForestClassifier, str]:
     """Read a trusted artifact and return its fitted classifier and version after schema checks."""
     if not path.is_file():
         raise RuntimeError(f"Model missing at {path}. Generate training.csv and run train.py first.")
@@ -41,17 +48,16 @@ def load_model(path: Path) -> tuple[RandomForestClassifier, str, dict | None]:
         or set(estimator.classes_) != set(MODEL_LABELS)
     ):
         raise RuntimeError("Model features or classes differ from the live contract. Retrain the model.")
-    return estimator, artifact["model_version"], artifact.get("evaluation")
+    return estimator, artifact["model_version"]
 
 
 class DriveClassifier:
     """Own each node's rolling windows and latest generated batch in one process."""
 
-    def __init__(self, model: RandomForestClassifier, version: str, evaluation: dict | None = None) -> None:
+    def __init__(self, model: RandomForestClassifier, version: str) -> None:
         """Keep the fitted model and initialize empty per-node windows and response caches."""
         self.model = model
         self.version = version
-        self.evaluation = evaluation
         self.windows: dict[str, dict[str, deque[TimedSample]]] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.last_input: dict[str, TelemetryBatch] = {}
@@ -195,6 +201,8 @@ async def lifespan(app: FastAPI):
     app.state.demo_nodes = int(demo_nodes) if demo_nodes else None
     if app.state.demo_nodes is not None and app.state.demo_nodes not in DEMO_NODE_COUNTS:
         raise ValueError(f"TELEMETRY_DEMO_NODES must be one of {DEMO_NODE_COUNTS}")
+    app.state.demo_actions = {}
+    app.state.demo_mode = "manual"
     app.state.reducer_token = os.environ.get("SPACETIME_TOKEN")
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
         app.state.http = client
@@ -211,22 +219,40 @@ async def health(request: Request) -> dict:
     return {
         "status": "ok", "modelVersion": request.app.state.classifier.version,
         "spacetimeForwarding": bool(request.app.state.reducer_url),
-        "evaluation": request.app.state.classifier.evaluation,
     }
 
 
-def demo_state(request: Request):
-    """Restrict the simulator controls to an explicitly enabled loopback demo."""
+def demo_state(request: Request, *, local_only: bool = True):
+    """Require an enabled demo and restrict its controls to loopback callers."""
     state = request.app.state
-    if state.demo_nodes is None or request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+    if state.demo_nodes is None or (
+        local_only and (request.client is None or request.client.host not in ("127.0.0.1", "::1"))
+    ):
         raise HTTPException(404, "Demo controls are unavailable")
     return state
 
 
-@app.get("/demo/fleet")
+DemoMode = Literal["manual", "automatic"]
+ACTIONS_BY_CLASS = {"heavy_writes": "rebalance", "drive_fault": "quarantine"}
+
+
+def fleet_settings(state) -> dict:
+    return {"nodes": state.demo_nodes, "options": DEMO_NODE_COUNTS, "mode": state.demo_mode}
+
+
+def demo_node_index(node_id: str) -> int | None:
+    match = re.fullmatch(r"sim-node-([0-9]{4})", node_id)
+    return int(match[1]) if match else None
+
+
 @app.get("/demo/fleet-size")
+async def view_demo_fleet(request: Request) -> dict:
+    return fleet_settings(demo_state(request, local_only=False))
+
+
+@app.get("/demo/fleet")
 async def demo_fleet(request: Request) -> dict:
-    return {"nodes": demo_state(request).demo_nodes, "options": DEMO_NODE_COUNTS}
+    return fleet_settings(demo_state(request))
 
 
 @app.put("/demo/fleet")
@@ -235,7 +261,89 @@ async def resize_fleet(request: Request, nodes: Annotated[int, Body(embed=True, 
     if nodes not in DEMO_NODE_COUNTS:
         raise HTTPException(422, "Choose one of the supported demo fleet sizes")
     state.demo_nodes = nodes
-    return {"nodes": nodes, "options": DEMO_NODE_COUNTS}
+    return fleet_settings(state)
+
+
+@app.put("/demo/mode")
+async def change_demo_mode(request: Request, mode: Annotated[DemoMode, Body(embed=True)]) -> dict:
+    state = demo_state(request)
+    state.demo_mode = mode
+    return fleet_settings(state)
+
+
+class DemoAction(BaseModel):
+    nodeId: NodeId
+    driveId: DriveId
+    kind: Literal["rebalance", "quarantine"]
+
+    def key(self) -> tuple[str, str, str]:
+        return self.nodeId, self.driveId, self.kind
+
+
+class DemoActionConfirmation(DemoAction):
+    actionId: str
+
+
+@app.get("/demo/action-status")
+async def view_demo_actions(request: Request) -> dict:
+    return {"actions": list(demo_state(request, local_only=False).demo_actions.values())}
+
+
+@app.get("/demo/actions")
+async def demo_actions(request: Request) -> dict:
+    return {"actions": list(demo_state(request).demo_actions.values())}
+
+
+@app.post("/demo/actions")
+async def request_action(action: DemoAction, request: Request) -> dict:
+    state = demo_state(request)
+    node = demo_node_index(action.nodeId)
+    if node is None or node >= state.demo_nodes:
+        raise HTTPException(404, "The simulated node is outside the active fleet")
+    return queue_action(state, action, state.classifier.latest.get(action.nodeId))
+
+
+def queue_action(state, action: DemoAction, batch: AssessmentBatch | None) -> dict:
+    existing = state.demo_actions.get(action.key())
+    if existing is not None and existing["state"] != "completed":
+        return existing
+
+    drive = next((drive for drive in batch.drives if drive.drive_id == action.driveId), None) if batch else None
+    if (drive is None or ACTIONS_BY_CLASS.get(drive.classification) != action.kind
+            or time.time_ns() // 1_000_000 - batch.sample_time_ms > max(5_000, 3 * batch.interval_ms)):
+        raise HTTPException(409, "The drive needs a current matching classification")
+    if action.kind == "rebalance":
+        if (action.nodeId, action.driveId, "quarantine") in state.demo_actions:
+            raise HTTPException(409, "The drive is being quarantined")
+        if not any(
+            peer.drive_id != action.driveId and not peer.smart_critical_warning
+            and not any(
+                state.demo_actions.get((action.nodeId, peer.drive_id, kind), {}).get("state")
+                in ACTIVE_DEMO_ACTION_STATES for kind in ACTIONS_BY_CLASS.values()
+            )
+            for peer in batch.drives
+        ):
+            raise HTTPException(409, "No eligible peer SSD can receive these writes")
+    if action.kind == "quarantine":
+        rebalance = state.demo_actions.get((action.nodeId, action.driveId, "rebalance"))
+        if rebalance is not None and rebalance["state"] in ACTIVE_DEMO_ACTION_STATES:
+            rebalance["state"] = "superseded"
+    record = {**action.model_dump(), "actionId": uuid4().hex, "state": "pending"}
+    state.demo_actions[action.key()] = record
+    return record
+
+
+@app.post("/demo/actions/applied")
+async def action_applied(action: DemoActionConfirmation, request: Request) -> dict:
+    state = demo_state(request)
+    record = state.demo_actions.get(action.key())
+    if record is None:
+        raise HTTPException(404, "The action was not requested")
+    if record["actionId"] != action.actionId:
+        raise HTTPException(409, "This action has been replaced")
+    if record["state"] == "pending":
+        record["state"] = "applied"
+    return record
 
 
 @app.post("/telemetry", response_model=AssessmentBatch)
@@ -245,6 +353,15 @@ async def ingest(
     """Validate one node batch and return the JSON document handed to SpacetimeDB."""
     state = request.app.state
     authorize_node(batch.node_id, authorization, state.node_tokens)
+    node = None
+    if state.demo_nodes is not None and batch.node_id.startswith("sim-node-"):
+        node = demo_node_index(batch.node_id)
+        if node is None or node >= MAX_DEMO_NODES:
+            raise HTTPException(422, "Simulated node ID is outside the 1,000-node demo")
+        first_drive = node * DEMO_DRIVES_PER_NODE
+        expected = {f"ssd-{i:04}" for i in range(first_drive, first_drive + DEMO_DRIVES_PER_NODE)}
+        if {drive.drive_id for drive in batch.drives} != expected:
+            raise HTTPException(422, "The demo requires the ten assigned SSDs in every node batch")
     result = await state.classifier.assess(batch)
     if state.reducer_url:
         try:
@@ -253,6 +370,22 @@ async def ingest(
             status = exc.status if isinstance(exc, aiohttp.ClientResponseError) else "network"
             LOGGER.warning("SpacetimeDB rejected or missed batch for %s (%s)", batch.node_id, status)
             raise HTTPException(502, "SpacetimeDB delivery failed. Retry the same batch.") from exc
+    if (node is not None and node < state.demo_nodes
+            and state.classifier.latest.get(batch.node_id) is result):
+        for drive in result.drives:
+            if drive.classification == "healthy":
+                rebalance = state.demo_actions.get((batch.node_id, drive.drive_id, "rebalance"))
+                if rebalance is not None and rebalance["state"] in ACTIVE_DEMO_ACTION_STATES:
+                    rebalance["state"] = "completed"
+        for drive in result.drives:
+            if state.demo_mode != "automatic" or drive.classification != "heavy_writes":
+                continue
+            action = DemoAction(nodeId=batch.node_id, driveId=drive.drive_id, kind="rebalance")
+            try:
+                queue_action(state, action, result)
+            except HTTPException as error:
+                if error.status_code != 409:
+                    raise
     return result
 
 

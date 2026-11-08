@@ -125,16 +125,15 @@ def preview_config(directory: Path) -> Path:
     read_routes = {
         rf"^/v1/database/{DATABASE}/subscribe(?:\?|$)": {"target": local_url(DB_PORT), "ws": True},
         r"^/v1/identity/websocket-token(?:\?|$)": {"target": local_url(DB_PORT)},
-        r"^/(?:healthz|demo/fleet-size)(?:\?|$)": {"target": local_url(API_PORT)},
+        r"^/(?:healthz|demo/(?:fleet-size|action-status))(?:\?|$)": {"target": local_url(API_PORT)},
     }
     config = {
         "esbuild": {"jsx": "automatic"},
         "define": {
             "import.meta.env.VITE_SPACETIMEDB_HOST": "window.location.origin",
             "import.meta.env.VITE_SPACETIMEDB_DB_NAME": json.dumps(DATABASE),
-            "import.meta.env.VITE_TELEMETRY_HEALTH_URL": json.dumps("/healthz"),
         },
-        "server": {"proxy": {**read_routes, r"^/demo/fleet(?:\?|$)": {"target": local_url(API_PORT)}}},
+        "server": {"proxy": {**read_routes, r"^/demo/(?:fleet|actions|mode)(?:\?|$)": {"target": local_url(API_PORT)}}},
         "preview": {"proxy": read_routes},
     }
     # Reuse the app's existing node filter, with a read-only fleet size that refreshes in both views.
@@ -161,28 +160,15 @@ def preview_config(directory: Path) -> Path:
   }, [resizing]);
 """
     app_source = json.dumps(str(WEB / "src" / "App.tsx"))
-    plugin = """
-config.plugins = [{
-  name: 'writeorwrong-fleet-size',
-  enforce: 'pre',
-  transform(code, id) {
-    if (id.split('?')[0] !== APP_SOURCE) return;
-    const start = code.indexOf('    if (!import.meta.env.DEV) return;');
-    const end = code.indexOf('  async function resizeFleet', start);
-    const dropdown = '{demoFleet && (';
-    if (start < 0 || end < 0 || !code.includes(dropdown)) {
-      this.error('The stock dashboard fleet controls have changed.');
-    }
-    return (code.slice(0, start) + FLEET_EFFECT + code.slice(end))
-      .replace(dropdown, '{import.meta.env.DEV && demoFleet && (');
-  },
-}];
-export default config;
-"""
+    adapter_path = json.dumps(str(ROOT / "demo-dashboard.mjs"))
     path = directory / "preview.mjs"
-    source = "const config = " + json.dumps(config) + ";\n"
-    path.write_text(source + plugin.replace("APP_SOURCE", app_source).replace("FLEET_EFFECT", json.dumps(fleet_effect)),
-                    encoding="utf-8")
+    path.write_text(
+        f"import demoDashboard from {adapter_path};\n"
+        f"const config = {json.dumps(config)};\n"
+        f"config.plugins = [demoDashboard({app_source}, {json.dumps(fleet_effect)})];\n"
+        "export default config;\n",
+        encoding="utf-8",
+    )
     return path
 
 

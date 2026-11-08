@@ -1,6 +1,6 @@
 # WriteOrWrong
 
-WriteOrWrong helps operators understand what is happening across a fleet of SSDs. It collects live measurements from Linux drives or a simulator, then uses a trained random forest to distinguish healthy operation, heavy writes, and suspected drive faults. SpacetimeDB streams those assessments to a React dashboard, where operators can follow fleet trends, inspect individual drives, and see what to check first. The simulator can replay up to 10,000 nodes for demos and load testing.
+WriteOrWrong helps operators understand what is happening across a fleet of SSDs. It collects live measurements from Linux drives or a simulator, then uses a trained random forest to distinguish healthy operation, heavy writes, and suspected drive faults. SpacetimeDB streams those assessments to a React dashboard, where operators can follow fleet trends, inspect individual drives, and see what to check first. The simulator can replay up to 1,000 nodes with 10 SSDs each for demos and load testing.
 
 ```text
 Synthetic simulator or Linux collector → FastAPI + random forest → SpacetimeDB → React dashboard
@@ -11,10 +11,10 @@ Synthetic simulator or Linux collector → FastAPI + random forest → Spacetime
 | Layer | What it does |
 | --- | --- |
 | Python 3.12, aiohttp, and httpx | Generate simulated telemetry, collect Linux device measurements, and deliver HTTP batches. |
-| FastAPI, Uvicorn, and Pydantic | Validate input, maintain per-drive windows, run inference, and expose assessments and model evaluation. |
+| FastAPI, Uvicorn, and Pydantic | Validate input, maintain per-drive windows, run inference, and expose drive assessments. |
 | scikit-learn, NumPy, and joblib | Train and evaluate the random forest and save a versioned artifact for inference. |
 | SpacetimeDB 2.14 and TypeScript | Accept assessed batches through a reducer and stream the latest state of each drive to subscribers. |
-| React, TypeScript, and Vite | Render the fleet map, rolling chart, drive inventory, simulator controls, and evaluation details. |
+| React, TypeScript, and Vite | Render the fleet map, rolling chart, drive inventory, simulator controls, and model details. |
 | unittest, Vitest, and jsdom | Test telemetry calculations and API behavior, plus the browser-side JSON helpers. |
 
 ## Run locally
@@ -54,7 +54,7 @@ SPACETIME_REDUCER_URL=http://127.0.0.1:3000/v1/database/ssd-monitor/call/ingest_
   python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-The repository already contains `telemetry/training.csv`. To generate another synthetic dataset, run `python simulate.py --training-csv /tmp/writeorwrong-training.csv` and pass that path to `train.py --input`. The trainer writes `model.joblib` locally. Set `TELEMETRY_MODEL_PATH` before starting FastAPI to load a different trusted artifact. Keep one API worker because the recent samples and exact-retry cache live in process memory. Vite proxies the demo controls and evaluation to port 8000. Reuse the artifact on later starts unless the model inputs, labels, or dataset change.
+The repository already contains `telemetry/training.csv`. To generate another synthetic dataset, run `python simulate.py --training-csv /tmp/writeorwrong-training.csv` and pass that path to `train.py --input`. The trainer writes `model.joblib` locally. Set `TELEMETRY_MODEL_PATH` before starting FastAPI to load a different trusted artifact. Keep one API worker because the recent samples and exact-retry cache live in process memory. Vite proxies the demo controls to port 8000. Reuse the artifact on later starts unless the model inputs, labels, or dataset change.
 
 ### 4. Start the simulator
 
@@ -64,9 +64,9 @@ cd telemetry
 python simulate.py --dashboard-control
 ```
 
-Once Vite starts, copy its local URL from the terminal into your browser. Choose 1, 10, 100, 500, 1,000, 2,500, 5,000, or 10,000 in **Simulated nodes**. That selection changes how many nodes send measurements. The chart starts a new history after a resize. Each simulated node has one SSD in this mode. Reports arrive about every 3–12 seconds depending on fleet size, and the classifier usually needs about 30 seconds of telemetry.
+Once Vite starts, copy its local URL from the terminal into your browser. Choose 1, 10, 100, 500, or 1,000 in **Simulated nodes**. That selection changes how many nodes send measurements. The chart starts a new history after a resize. Each managed node has ten SSDs. Reports arrive every ten seconds, and the classifier usually needs about 30 seconds of telemetry.
 
-Use `python simulate.py --nodes 1` for fixed-size replay, `--seconds 120` for a timed run, or `--failure-chance 0` for an incident-free workload. Fixed-size mode also accepts `--drives` and `--drives-per-node`. The default simulator starts heavy writes with about 0.27% probability and a fault with about 0.03% probability per eligible healthy three seconds. Those are incident start probabilities. Incidents last roughly 30–60 seconds, so a snapshot can show a larger share of affected drives. Press Ctrl+C in each terminal to stop its process.
+Use `python simulate.py --nodes 1` for fixed-size replay, `--seconds 120` for a timed run, or `--failure-chance 0` for an incident-free workload. Fixed-size mode also accepts `--drives` and `--drives-per-node`. An eligible node has a 10% chance of starting a simulated incident per three seconds. The chance is 7.5% for heavy writes and 2.5% for a drive fault. Incidents last roughly 30–60 seconds, so a snapshot can show a larger share of affected drives. Press Ctrl+C in each terminal to stop its process.
 
 ### Preview and diagnose
 
@@ -93,7 +93,11 @@ Install [cloudflared](https://developers.cloudflare.com/tunnel/get-started/quick
 python3.12 dev.py
 ```
 
-The script starts SpacetimeDB, FastAPI, and the simulator with 1,000 nodes. Open the local dashboard URL printed by the launcher to change the fleet size using **Simulated nodes**. The single `trycloudflare.com` link opens a viewing dashboard with no fleet controls. Both dashboards receive the same telemetry. Press Ctrl+C to stop the run.
+The script starts SpacetimeDB, FastAPI, and the simulator with 1,000 nodes and 10 SSDs per node. Open the local dashboard URL printed by the launcher to change the fleet size using **Simulated nodes**. Open the `trycloudflare.com` link printed for the current run to view the dashboard without dropdowns. Both dashboards receive the same telemetry. Press Ctrl+C to stop the run.
+
+Each ring on the map is one node, and each dot is an SSD. Select a dot or an inventory row to inspect that drive. On localhost, **Rebalance writes** shifts new simulated writes off a drive classified as **Heavy writes** and distributes them among eligible SSDs on the same node. **Quarantine drive** marks a drive classified as a **Drive fault** as degraded and stops new writes to it. Each action shows its own state and changes to **Applied** after the simulator sends an updated reading. Quarantine remains active for the demo run. Use **Remediation mode** to choose **Monitor / manual actions** or **Automatic write rebalancing**. The automatic mode queues rebalancing when the model detects heavy writes. Drive faults require manual quarantine in either mode. The node map shows **Rebalance queued** until the simulator applies the policy, then **Rebalancing writes** while it remains active. Rebalancing ends when fresh telemetry classifies the affected SSD as **Healthy**, and its node marker clears when no rebalance remains. A later heavy-write alert can trigger another rebalance. Switching to manual stops new automatic actions while any existing rebalance runs until recovery. The Cloudflare dashboard can display the action state and remains view-only.
+
+These actions control the synthetic workload. Real SSD remediation would require a workload or storage service that can route writes.
 
 ## How the model learns and classifies
 
@@ -107,7 +111,7 @@ The bundled [training CSV](telemetry/training.csv) has **4,680 synthetic reading
 | `heavy_writes` | Higher write throughput and heavier queue and latency pressure. |
 | `drive_fault` | Higher latency, queue pressure, and injected SMART warnings or increases in media errors. Some fault samples also have high write throughput. |
 
-The online simulator and Linux collector send **measurements only** to `POST /telemetry`. The scenario label stays in the generator. The Linux collector derives rates and latency from changes in kernel disk counters and can read NVMe health data using `nvme smart-log`. The checked-in [`field.csv`](telemetry/field.csv) contains a header and no measurements. The bundled model evaluation uses synthetic data.
+The online simulator and Linux collector send **measurements only** to `POST /telemetry`. The scenario label stays in the generator. The Linux collector derives rates and latency from changes in kernel disk counters and can read NVMe health data using `nvme smart-log`. The checked-in [`field.csv`](telemetry/field.csv) contains a header and no measurements.
 
 ### What goes into a prediction
 
@@ -132,17 +136,19 @@ At runtime, each tree follows its learned splits for the new feature vector and 
 
 The API batches ready windows for prediction over about 10 ms. Training starts a new window when the ground-truth label changes. Live inference continuously slides the window over real readings, so old and new behavior can coexist for a while during onset and recovery. The dashboard also marks a reading stale after three expected sample intervals, with a minimum of five seconds.
 
-### How to measure accuracy
+### Why a random forest
 
-The trainer uses the first split of a five-way stratified group splitter, holding out whole `run_id` groups. Adjacent windows from the same run stay on the same side of the split. This avoids testing on windows that overlap the training windows from that run.
+The classifier receives 11 structured features per drive, already summarized over a 30-second window. A forest can learn how the signals interact. For example, high write throughput and latency may point to a busy workload, while high latency with new media errors or a SMART warning can point to a drive fault. Averaging predictions from 64 trees makes the result less dependent on any one tree's splits. The trained artifact runs locally on the CPU and can score several drives in a batch. [Scikit-learn random forest documentation](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html)
 
-The bundled CSV reproduced **100% accuracy and balanced accuracy on 555 held-out windows from 15 synthetic runs**, with 185 windows per class. This measures performance on new runs from the same simulator. The 555 overlapping windows represent 15 independent runs. Expand **Model accuracy** on the dashboard for the dataset, class precision, and recall.
+- **Logistic regression** is a simpler baseline for structured data. Capturing how the meaning of latency changes with SMART warnings or write throughput would require adding interactions or other feature transformations. [Scikit-learn logistic regression documentation](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html)
+- **Unsupervised anomaly detection** can flag a drive that differs from its peers. WriteOrWrong needs a specific label to choose between rebalancing and flagging a drive for quarantine, so the forest learns from examples of each condition. [Scikit-learn anomaly detection guide](https://scikit-learn.org/stable/modules/outlier_detection.html)
+- **A neural sequence model** could learn timing patterns directly from raw readings. The current pipeline already summarizes recent history, and its training data consists of 72 synthetic runs. A compact forest is a better fit for the available inputs and local demo.
 
-- **Overall accuracy** is the fraction of labeled windows classified correctly. A fleet with 99% healthy windows could yield 99% accuracy from a model that always predicts Healthy.
-- **Balanced accuracy** gives each class equal weight by averaging its recall.
-- **Fault recall** measures how many labeled faults were caught. **Fault precision** measures how often a fault prediction was correct.
+Training fits on all complete labeled windows. The bundled training data is synthetic. Comparing models for real fleet use would require independently labeled measurements from physical SSDs.
 
-For field evaluation, label controlled healthy and heavy-write sessions from the workload that actually ran. Use verified diagnostics, incident tickets, or a controlled test as ground truth for fault sessions. Group all captures from a physical drive under one `run_id` so that drive stays on one side of the split. Collect at least five independent groups with complete windows per class. Test across drives and workloads, including heavy writes with faults, missing SMART readings, and onset and recovery periods. Report a confusion matrix, false alerts per drive-day, and incident detection delay in addition to window-level scores.
+### Capture real drive telemetry
+
+The example records one healthy run. Collect at least five independent runs with complete windows for each of the three classes before training.
 
 ```sh
 # From telemetry/ on a Linux node with the environment active.
@@ -151,7 +157,7 @@ python agent.py --node-id node-01 --device nvme0n1 --interval 1 \
 python train.py --input captures.csv --data-source "Labeled Linux SSD captures"
 ```
 
-For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--device` for multiple SSDs, use `--mount /` to report filesystem capacity, and use `--smart-interval 0` to turn off optional SMART polling. The [Alibaba SSD dataset](https://github.com/shujiehan/ssdanalysis#readme) provides SMART logs and failure tickets. [Microsoft Research block I/O traces](https://www.microsoft.com/en-us/research/people/dnarayan/more-information/) provide workload examples. Those sources can inform experimental design, but an evaluation of this model needs labeled I/O and SMART readings aligned to its feature windows.
+For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--device` for multiple SSDs, use `--mount /` to report filesystem capacity, and use `--smart-interval 0` to turn off optional SMART polling. The [Alibaba SSD dataset](https://github.com/shujiehan/ssdanalysis#readme) provides SMART logs and failure tickets. [Microsoft Research block I/O traces](https://www.microsoft.com/en-us/research/people/dnarayan/more-information/) provide workload examples. To train on real measurements, collect labeled I/O and SMART readings aligned to the feature windows.
 
 ## Data and file guide
 
@@ -163,7 +169,7 @@ For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--devi
 | [`telemetry/simulate.py`](telemetry/simulate.py) | Generates labeled training data or replays changing synthetic measurements across a configurable number of nodes. |
 | [`telemetry/schemas.py`](telemetry/schemas.py) | Pydantic types, validation limits, class names, and JSON field names shared by the Python pipeline. |
 | [`telemetry/features.py`](telemetry/features.py) | Builds the same rolling-window features for offline training and live inference. |
-| [`telemetry/train.py`](telemetry/train.py) | Loads labeled runs, holds out groups, trains and evaluates the model, and writes the joblib artifact. |
+| [`telemetry/train.py`](telemetry/train.py) | Builds features from labeled runs, fits the random forest, and writes the joblib artifact. |
 | [`telemetry/app.py`](telemetry/app.py) | Runs the FastAPI service, maintains per-drive history, assesses batches, controls the local demo fleet, and forwards classifications. |
 | [`telemetry/test_pipeline.py`](telemetry/test_pipeline.py) | Tests counter conversion, coverage gaps, inference ordering, retries, and the database handoff. |
 | [`telemetry/requirements.txt`](telemetry/requirements.txt) | Python runtime and model dependencies. |
@@ -176,7 +182,7 @@ For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--devi
 | Path | Role |
 | --- | --- |
 | [`my-spacetime-app/index.html`](my-spacetime-app/index.html), [`src/main.tsx`](my-spacetime-app/src/main.tsx) | Browser entry point and React bootstrap. The bootstrap connects to the configured SpacetimeDB host and database. |
-| [`src/App.tsx`](my-spacetime-app/src/App.tsx), [`src/app.css`](my-spacetime-app/src/app.css) | Dashboard subscription, node map, history chart, fleet-size selector, drive details, evaluation display, and Catppuccin Latte styling. |
+| [`src/App.tsx`](my-spacetime-app/src/App.tsx), [`src/app.css`](my-spacetime-app/src/app.css) | Dashboard subscription, node map, history chart, fleet-size selector, drive details and Catppuccin Latte styling. |
 | [`src/module_bindings/`](my-spacetime-app/src/module_bindings/) | Generated client connection and types for database tables, reducers, and procedures. |
 | [`spacetimedb/src/index.ts`](my-spacetime-app/spacetimedb/src/index.ts) | TypeScript database module. Defines `ssd_status`, validates incoming assessments, keeps the latest row per node and drive, and contains the example `person` table and reducers. |
 | [`src/jsonFile.ts`](my-spacetime-app/src/jsonFile.ts), [`src/spacetime.ts`](my-spacetime-app/src/spacetime.ts), [`src/sync.ts`](my-spacetime-app/src/sync.ts) | Observable helpers for reading and downloading browser JSON, subscribing to `person` rows, and importing or exporting those rows. These helpers are separate from SSD intake. |
@@ -189,11 +195,11 @@ For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--devi
 
 `POST /telemetry` accepts a node ID, Unix timestamp in milliseconds, sample interval, drive readings, and optional volume measurements. The response contains each drive's classification, model score, window coverage, and first suggested check. Read and write latency may be null when no corresponding operations completed. The cumulative media error counter is serialized as a decimal string to preserve integer precision.
 
-`GET /handoff/latest/{node_id}` returns the latest assessment. Add `?wire=true` to see the reducer argument. FastAPI sends a one-element positional argument array with snake_case fields. Present optional values are wrapped in `{"some": value}` and absent values use `null`. The API reuses an assessment on an exact retry and returns 409 for a conflicting or older sample. SpacetimeDB keeps current rows, while the web chart samples the live node counts for up to two minutes in the open page.
+`GET /handoff/latest/{node_id}` returns the latest assessment. Add `?wire=true` to see the reducer argument. FastAPI sends a one-element positional argument array with snake_case fields. Present optional values are wrapped in `{"some": value}` and absent values use `null`. The API reuses an assessment on an exact retry and returns 409 for a conflicting or older sample. SpacetimeDB keeps current rows, while the demo chart samples live drive counts by status for up to two minutes in the open page.
 
 ## SSD auto-correction roadmap
 
-Today the system **detects and suggests**. It records no remediation actions and never changes the device or the workload. A useful first implementation would automate recovery from verified workload contention and track hardware faults as operator incidents.
+The demo records remediation actions and changes its synthetic workload. On real drives, the collector and classifier detect and suggest checks. A useful first implementation would automate recovery from verified workload contention and track hardware faults as operator incidents.
 
 | Situation | Proposed action | How to recognize recovery |
 | --- | --- | --- |
