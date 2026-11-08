@@ -161,9 +161,15 @@ def authorize_node(node_id: str, authorization: str | None, tokens: dict[str, st
             raise HTTPException(401, "A valid token for this node is required")
 
 
-def reducer_args(batch: AssessmentBatch) -> list[str]:
-    """Wrap the displayed JSON document as the single string argument to the reducer."""
-    return [batch.model_dump_json(by_alias=True)]
+def reducer_args(batch: AssessmentBatch) -> list[dict[str, object]]:
+    """Convert one assessment into the reducer's typed positional JSON argument."""
+    document = batch.model_dump(mode="json")
+    for drive in document["drives"]:
+        for field in ("read_latency_ms", "write_latency_ms", "smart_critical_warning",
+                      "media_errors_total", "model_score"):
+            if drive[field] is not None:
+                drive[field] = {"some": drive[field]}
+    return [document]
 
 
 async def send_to_spacetime(
@@ -221,12 +227,14 @@ async def ingest(
     return result
 
 
-@app.get("/handoff/latest/{node_id}", response_model=AssessmentBatch)
-async def preview(node_id: str, request: Request, authorization: BearerHeader = None) -> AssessmentBatch:
-    """Return the latest generated document for this node so teammates can inspect the contract."""
+@app.get("/handoff/latest/{node_id}")
+async def preview(
+    node_id: str, request: Request, authorization: BearerHeader = None, wire: bool = False
+) -> AssessmentBatch | list[dict[str, object]]:
+    """Return a node's latest readable assessment or its exact reducer arguments."""
     state = request.app.state
     authorize_node(node_id, authorization, state.node_tokens)
     result = state.classifier.latest.get(node_id)
     if result is None:
         raise HTTPException(404, "This node has not sent telemetry yet")
-    return result
+    return reducer_args(result) if wire else result

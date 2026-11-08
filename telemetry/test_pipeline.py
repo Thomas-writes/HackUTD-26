@@ -1,7 +1,6 @@
 """Check the Linux conversion, rolling coverage and database handoff contract."""
 
 import asyncio
-import json
 import os
 import unittest
 from collections import deque
@@ -20,7 +19,7 @@ from sklearn.ensemble import RandomForestClassifier
 from agent import Counters, measure
 from app import DriveClassifier, app, reducer_args, send_to_spacetime
 from features import FEATURE_NAMES, TimedSample, append_sample
-from schemas import MODEL_LABELS, AssessmentBatch, DriveSample, TelemetryBatch
+from schemas import MODEL_LABELS, AssessmentBatch, DriveAssessment, DriveSample, TelemetryBatch
 
 
 def batch_at(timestamp: int) -> TelemetryBatch:
@@ -89,7 +88,8 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(client.get("/handoff/latest/test-node", headers=headers).json(), document)
             self.assertEqual(client.post("/telemetry", json=body, headers=headers).json(), document)
             self.assertEqual(client.post("/telemetry", json=first, headers=headers).status_code, 409)
-            self.assertEqual(json.loads(reducer_args(AssessmentBatch.model_validate(document))[0]), document)
+            wire = client.get("/handoff/latest/test-node?wire=true", headers=headers).json()
+            self.assertEqual(wire, reducer_args(AssessmentBatch.model_validate(document)))
 
     def test_failed_delivery_can_be_retried(self) -> None:
         """Verify a downstream outage returns 502 and a retry sends the same prepared document."""
@@ -115,12 +115,16 @@ class ReducerTests(unittest.IsolatedAsyncioTestCase):
         np.testing.assert_allclose(left, model.predict_proba(rows[:2]))
         np.testing.assert_allclose(right, model.predict_proba(rows[2:]))
 
-    async def test_http_uses_one_json_string_argument(self) -> None:
-        """Verify the reducer receives a single serialized batch and the expected auth header."""
+    async def test_http_uses_one_typed_batch_argument(self) -> None:
+        """Verify the reducer receives one batch object with the expected options and auth header."""
         batch = batch_at(1_000)
         output = AssessmentBatch(
             node_id=batch.node_id, sample_time_ms=batch.sample_time_ms, interval_ms=batch.interval_ms,
-            model_version="test", drives=[], volumes=[],
+            model_version="test", volumes=[],
+            drives=[DriveAssessment(
+                **batch.drives[0].model_dump(), classification="warming_up", model_score=None,
+                window_samples=1, window_covered_ms=1_000, next_check="Wait for more samples.",
+            )],
         )
 
         async def reducer(request: web.Request) -> web.Response:
@@ -128,8 +132,11 @@ class ReducerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.method, "POST")
             self.assertEqual(request.headers["authorization"], "Bearer test-secret")
             args = await request.json()
-            self.assertEqual(len(args), 1)
-            self.assertEqual(json.loads(args[0]), output.model_dump(by_alias=True))
+            self.assertEqual(args, reducer_args(output))
+            self.assertEqual(args[0]["node_id"], batch.node_id)
+            self.assertEqual(args[0]["drives"][0]["read_latency_ms"], {"some": 12.0})
+            self.assertEqual(args[0]["drives"][0]["smart_critical_warning"], {"some": 0})
+            self.assertIsNone(args[0]["drives"][0]["model_score"])
             return web.Response()
 
         receiver = web.Application()

@@ -1,116 +1,56 @@
-Get a SpacetimeDB React app running in under 5 minutes.
+# DriveWatch
 
-## Prerequisites
+DriveWatch shows the latest SSD assessment for every node. The fleet view puts unexpected slowdowns first, separates likely write contention from stale telemetry, and gives the engineer a first check and the underlying measurements for each drive.
 
-- A recent version of [Node.js](https://nodejs.org/) 22, 24, or 26 or later
-- [SpacetimeDB CLI](https://spacetimedb.com/install) installed
+## Run the demo locally
 
-Install the [SpacetimeDB CLI](https://spacetimedb.com/install) before continuing.
+Use Python 3.12, a Node version supported by `package.json`, and the [SpacetimeDB CLI](https://spacetimedb.com/install) 2.14. Run each block in a separate terminal from the repository root.
 
----
+**1. Start SpacetimeDB**
 
-## Create your project
-
-Run the `spacetime dev` command to create a new project with a SpacetimeDB module and React client.
-
-This will start the local SpacetimeDB server, publish your module, generate TypeScript bindings, and start the React development server.
-
-```bash
-spacetime dev --template react-ts
+```sh
+spacetime start --listen-addr 127.0.0.1:3000
 ```
 
+**2. Publish the module and start React**
 
-
-## Open your app
-
-Navigate to [http://localhost:5173](http://localhost:5173) to see your app running.
-
-The template includes a basic React app connected to SpacetimeDB.
-
-
-
-## Explore the project structure
-
-Your project contains both server and client code.
-
-Edit `spacetimedb/src/index.ts` to add tables and reducers. Edit `client/src/App.tsx` to build your UI.
-
-```
-my-spacetime-app/
-├── spacetimedb/          # Your SpacetimeDB module
-│   └── src/
-│       └── index.ts      # Server-side logic
-├── client/               # React frontend
-│   └── src/
-│       ├── App.tsx
-│       └── module_bindings/  # Auto-generated types
-└── package.json
-```
-
-
-
-## Understand tables and reducers
-
-Open `spacetimedb/src/index.ts` to see the module code. The template includes a `person` table and two reducers: `add` to insert a person, and `sayHello` to greet everyone.
-
-Tables store your data. Reducers are functions that modify data — they're the only way to write to the database.
-
-```typescript
-import { schema, table, t } from 'spacetimedb/server';
-
-const spacetimedb = schema({
-  person: table(
-    { public: true },
-    {
-      name: t.string(),
-    }
-  ),
-});
-export default spacetimedb;
-
-export const add = spacetimedb.reducer(
-  { name: t.string() },
-  (ctx, { name }) => {
-    ctx.db.person.insert({ name });
-  }
-);
-
-export const sayHello = spacetimedb.reducer(ctx => {
-  for (const person of ctx.db.person.iter()) {
-    console.info(`Hello, ${person.name}!`);
-  }
-  console.info('Hello, World!');
-});
-```
-
-
-
-## Test with the CLI
-
-Open a new terminal and navigate to your project directory. Then use the SpacetimeDB CLI to call reducers and query your data directly.
-
-```bash
+```sh
 cd my-spacetime-app
-
-# Call the add reducer to insert a person
-spacetime call add Alice
-
-# Query the person table
-spacetime sql "SELECT * FROM person"
- name
----------
- "Alice"
-
-# Call sayHello to greet everyone
-spacetime call say_hello
-
-# View the module logs
-spacetime logs
-2025-01-13T12:00:00.000000Z  INFO: Hello, Alice!
-2025-01-13T12:00:00.000000Z  INFO: Hello, World!
+npm ci
+npm ci --prefix spacetimedb
+npm run spacetime:publish:local
+VITE_SPACETIMEDB_HOST=ws://127.0.0.1:3000 VITE_SPACETIMEDB_DB_NAME=ssd-monitor npm run dev
 ```
 
-## Next steps
+Open [localhost:5173](http://localhost:5173). The dashboard subscribes to `ssd_status` and will show rows as they arrive.
 
-- See the [Chat App Tutorial](https://spacetimedb.com/docs/tutorials/chat-app) for a complete example
-- Read the [TypeScript SDK Reference](https://spacetimedb.com/docs/clients/typescript) for detailed API docs
+**3. Train the demo model and start FastAPI**
+
+```sh
+cd telemetry
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python simulate.py --training-csv training.csv
+python train.py
+export SPACETIME_REDUCER_URL=http://127.0.0.1:3000/v1/database/ssd-monitor/call/ingest_ssd_batch
+python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+**4. Send live readings**
+
+```sh
+cd telemetry
+source .venv/bin/activate
+python simulate.py --drives 60 --drives-per-node 5 --interval 1 --seconds 120
+```
+
+The initial readings show **Warming up**. Classification starts after roughly 30 seconds of coverage. Use `--drives 1000 --drives-per-node 10` for the fleet load test. Readings become **Stale** after three expected intervals, with a five-second minimum.
+
+## Data flow
+
+The collector sends one batch per node to FastAPI. FastAPI sends each assessed batch as the typed argument to `ingest_ssd_batch`. The reducer keeps one row per node and drive in `ssd_status`, and only a newer sample replaces that row. React reads those rows through its SpacetimeDB subscription.
+
+For a remote demo, configure `VITE_SPACETIMEDB_HOST`, `VITE_SPACETIMEDB_DB_NAME`, and `SPACETIME_REDUCER_URL` for the same database. The dashboard uses public read access to `ssd_status`. To restrict ingestion, set `SSD_WRITER_IDENTITY` to the writer's hex identity in the module's publishing environment and set the matching `SPACETIME_TOKEN` in FastAPI. The token stays in the API environment.
+
+Run `npm run spacetime:generate` after changing the module schema and `npm run build` to check the frontend. [Collector and wire contract](../telemetry/README.md)

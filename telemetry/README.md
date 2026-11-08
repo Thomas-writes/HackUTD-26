@@ -37,22 +37,20 @@ For remote collectors, serve the intake through a reachable HTTPS endpoint and s
 ## SpacetimeDB handoff
 
 - **`POST /telemetry`** accepts one node batch and returns the assessment document.
-- **`GET /handoff/latest/{node_id}`** shows the latest generated document for that node. It matches the JSON inside the reducer argument. See [example-output.json](example-output.json).
+- **`GET /handoff/latest/{node_id}`** shows the latest generated assessment in camelCase. Add **`?wire=true`** to see the exact HTTP body sent to SpacetimeDB. See [example-output.json](example-output.json).
 - **`GET /healthz`** shows the loaded model version and whether forwarding is configured.
 
 When `SPACETIME_REDUCER_URL` is unset, FastAPI runs in preview mode. To enable forwarding, point it at the team's reducer URL and provide the service credential as `SPACETIME_TOKEN` when the reducer requires authentication.
 
 ```sh
-export SPACETIME_REDUCER_URL='https://maincloud.spacetimedb.com/v1/database/YOUR_DATABASE/call/ingest_ssd_batch'
+export SPACETIME_REDUCER_URL='http://127.0.0.1:3000/v1/database/ssd-monitor/call/ingest_ssd_batch'
 python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-The reducer takes **one string argument**, for example `payload` with type `t.string()`. SpacetimeDB's HTTP API takes an array of positional arguments. FastAPI sends one request per node batch with this wire shape in JavaScript terms. [SpacetimeDB reducer HTTP API](https://spacetimedb.com/docs/http/database/)
+The reducer takes **one typed batch object**. SpacetimeDB's HTTP API takes an array of positional arguments, so the body is an array containing the batch. The wire keys are snake_case. Present optional values use `{"some": value}` and missing values use `null`. [SpacetimeDB reducer HTTP API](https://spacetimedb.com/docs/http/database/)
 
-```js
-const requestBody = JSON.stringify([JSON.stringify(document)]);
-// Inside the reducer, after SpacetimeDB decodes the positional arguments.
-const batch = JSON.parse(payload);
+```sh
+curl -fsS 'http://127.0.0.1:8000/handoff/latest/sim-node-0000?wire=true' | python -m json.tool
 ```
 
 | Field | Meaning |
@@ -65,7 +63,7 @@ const batch = JSON.parse(payload);
 
 `classification` is `normal`, `likely_workload_contention`, `unexpected_slowdown` or `warming_up`. `warming_up` means fewer than three readings or under 29 seconds of observed coverage in the 30-second window. It has a null `modelScore`. Other scores are the model's class scores. `nextCheck` is a suggested first action. Read and write latency are null for intervals with zero completed operations of that type. SMART fields can also be null. The cumulative `mediaErrorsTotal` is a decimal string to preserve precision in JavaScript.
 
-Use `(nodeId, driveId)` for current status and `(nodeId, driveId, sampleTimeMs)` to deduplicate history. An exact retry reuses the same assessment. The reducer should only replace the latest status when the incoming timestamp is newer, since retries and delayed delivery can repeat an observation. FastAPI returns `409` for stale input and `502` when configured reducer delivery fails. The preview endpoint shows the generated JSON even when delivery fails.
+The checked-in reducer keeps the latest assessment per `(nodeId, driveId)` in `ssd_status` and ignores repeated or older samples. An exact FastAPI retry reuses the same assessment. FastAPI returns `409` for stale input and `502` when configured reducer delivery fails. The preview endpoint shows the generated JSON even when delivery fails. [Run the connected dashboard](../my-spacetime-app/README.md)
 
 ## Train with another dataset
 
