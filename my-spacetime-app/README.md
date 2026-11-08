@@ -1,6 +1,6 @@
 # DriveWatch
 
-DriveWatch shows the latest SSD assessment for every node. The fleet view puts unexpected slowdowns first, separates likely write contention from stale telemetry, and gives the engineer a first check and the underlying measurements for each drive.
+DriveWatch shows the latest SSD assessment for every node. The Catppuccin Latte dashboard shows a fleet map and plots node counts by severity over time. Green marks healthy drives, yellow marks heavy writes, and red marks suspected drive faults. Use the drive inventory to inspect each assessment and see what to check first.
 
 ## Run the demo locally
 
@@ -32,9 +32,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python simulate.py --training-csv training.csv
-python train.py
+python train.py --data-source "Synthetic demo"
 export SPACETIME_REDUCER_URL=http://127.0.0.1:3000/v1/database/ssd-monitor/call/ingest_ssd_batch
-python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+TELEMETRY_DEMO_NODES=1000 python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
 **4. Send live readings**
@@ -42,10 +42,14 @@ python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
 ```sh
 cd telemetry
 source .venv/bin/activate
-python simulate.py --drives 60 --drives-per-node 5 --interval 1 --seconds 120
+python simulate.py --dashboard-control
 ```
 
-The initial readings show **Warming up**. Classification starts after roughly 30 seconds of coverage. Use `--drives 1000 --drives-per-node 10` for the fleet load test. Readings become **Stale** after three expected intervals, with a five-second minimum.
+Use **Simulated nodes** in the dashboard to choose a fleet size from 1 to 10,000. The simulator starts with one SSD per node and reports every 3–12 seconds depending on fleet size. Heavy writes start on about 0.27% of eligible healthy three-second intervals, and drive faults on about 0.03%. The simulator changes the readings, and the model classifies them after roughly 30 seconds of coverage. The graph starts a new history when the fleet size changes.
+
+Expand **Model accuracy** to see the dataset, balanced accuracy, and precision and recall per class. The bundled score comes from held-out synthetic runs. For field validation, hold out physical drives and use independent diagnoses as ground truth.
+
+Press Ctrl+C in the simulator terminal to stop it. Use `python simulate.py --nodes 1000 --seconds 120` for a fixed-size timed run.
 
 ## Data flow
 

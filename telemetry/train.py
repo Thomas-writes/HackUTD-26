@@ -7,7 +7,7 @@ from pathlib import Path
 
 import joblib
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report
 from sklearn.model_selection import StratifiedGroupKFold
 
 from features import FEATURE_NAMES, TimedSample, append_sample
@@ -50,7 +50,7 @@ def read_windows(path: Path) -> tuple[list[tuple[float, ...]], list[str], list[s
     return features, labels, groups
 
 
-def train(input_path: Path, output_path: Path, version: str) -> None:
+def train(input_path: Path, output_path: Path, version: str, data_source: str = "Labeled CSV") -> None:
     """Fit on labeled runs, print held-out scores and write a versioned joblib artifact."""
     rows, labels, runs = read_windows(input_path)
     for label in MODEL_LABELS:
@@ -72,8 +72,20 @@ def train(input_path: Path, output_path: Path, version: str) -> None:
     model.fit([rows[index] for index in training], [labels[index] for index in training])
     predictions = model.predict([rows[index] for index in test])
     print("Held-out run evaluation")
-    print(classification_report([labels[index] for index in test], predictions, zero_division=0))
-    joblib.dump({"model": model, "model_version": version, "feature_names": FEATURE_NAMES}, output_path)
+    expected = [labels[index] for index in test]
+    print(classification_report(expected, predictions, zero_division=0))
+    report = classification_report(expected, predictions, output_dict=True, zero_division=0)
+    evaluation = {
+        "accuracy": accuracy_score(expected, predictions),
+        "balancedAccuracy": balanced_accuracy_score(expected, predictions),
+        "classes": {label: report[label] for label in MODEL_LABELS},
+        "windows": len(expected),
+        "runs": len({runs[index] for index in test}),
+        "dataSource": data_source,
+    }
+    joblib.dump({
+        "model": model, "model_version": version, "feature_names": FEATURE_NAMES, "evaluation": evaluation,
+    }, output_path)
     print(f"Saved {version} to {output_path}")
 
 
@@ -82,9 +94,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("training.csv"))
     parser.add_argument("--output", type=Path, default=Path("model.joblib"))
-    parser.add_argument("--version", default="ssd-rf-v1")
+    parser.add_argument("--version", default="ssd-rf-v2")
+    parser.add_argument("--data-source", default="Labeled CSV", help="Data provenance displayed alongside accuracy")
     args = parser.parse_args()
-    train(args.input, args.output, args.version)
+    train(args.input, args.output, args.version, args.data_source)
 
 
 if __name__ == "__main__":

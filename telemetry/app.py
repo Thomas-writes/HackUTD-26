@@ -13,23 +13,23 @@ from typing import Annotated
 import aiohttp
 import joblib
 import numpy as np
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from sklearn.ensemble import RandomForestClassifier
 
 from features import FEATURE_NAMES, TimedSample, append_sample
-from schemas import MODEL_LABELS, AssessmentBatch, DriveAssessment, TelemetryBatch
+from schemas import DEMO_NODE_COUNTS, MODEL_LABELS, AssessmentBatch, DriveAssessment, TelemetryBatch
 
 LOGGER = logging.getLogger("uvicorn.error")
 DEFAULT_MODEL = Path(__file__).with_name("model.joblib")
 NEXT_CHECK = {
-    "normal": "Continue monitoring.",
-    "likely_workload_contention": "Check the write-heavy job. Cap it and see if latency recovers.",
-    "unexpected_slowdown": "Inspect drive and host logs. Compare other drives on the node.",
+    "healthy": "Continue monitoring.",
+    "heavy_writes": "Check the write-heavy job. Cap it and see if latency recovers.",
+    "drive_fault": "Check SMART warnings, media errors, and drive logs.",
     "warming_up": "Wait for enough recent samples to classify this drive.",
 }
 
 
-def load_model(path: Path) -> tuple[RandomForestClassifier, str]:
+def load_model(path: Path) -> tuple[RandomForestClassifier, str, dict | None]:
     """Read a trusted artifact and return its fitted classifier and version after schema checks."""
     if not path.is_file():
         raise RuntimeError(f"Model missing at {path}. Generate training.csv and run train.py first.")
@@ -41,16 +41,17 @@ def load_model(path: Path) -> tuple[RandomForestClassifier, str]:
         or set(estimator.classes_) != set(MODEL_LABELS)
     ):
         raise RuntimeError("Model features or classes differ from the live contract. Retrain the model.")
-    return estimator, artifact["model_version"]
+    return estimator, artifact["model_version"], artifact.get("evaluation")
 
 
 class DriveClassifier:
     """Own each node's rolling windows and latest generated batch in one process."""
 
-    def __init__(self, model: RandomForestClassifier, version: str) -> None:
+    def __init__(self, model: RandomForestClassifier, version: str, evaluation: dict | None = None) -> None:
         """Keep the fitted model and initialize empty per-node windows and response caches."""
         self.model = model
         self.version = version
+        self.evaluation = evaluation
         self.windows: dict[str, dict[str, deque[TimedSample]]] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.last_input: dict[str, TelemetryBatch] = {}
@@ -190,6 +191,10 @@ async def lifespan(app: FastAPI):
     app.state.classifier = DriveClassifier(*load_model(model_path))
     app.state.node_tokens = node_tokens(os.environ.get("TELEMETRY_NODE_TOKENS"))
     app.state.reducer_url = os.environ.get("SPACETIME_REDUCER_URL")
+    demo_nodes = os.getenv("TELEMETRY_DEMO_NODES")
+    app.state.demo_nodes = int(demo_nodes) if demo_nodes else None
+    if app.state.demo_nodes is not None and app.state.demo_nodes not in DEMO_NODE_COUNTS:
+        raise ValueError(f"TELEMETRY_DEMO_NODES must be one of {DEMO_NODE_COUNTS}")
     app.state.reducer_token = os.environ.get("SPACETIME_TOKEN")
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
         app.state.http = client
@@ -206,7 +211,30 @@ async def health(request: Request) -> dict:
     return {
         "status": "ok", "modelVersion": request.app.state.classifier.version,
         "spacetimeForwarding": bool(request.app.state.reducer_url),
+        "evaluation": request.app.state.classifier.evaluation,
     }
+
+
+def demo_state(request: Request):
+    """Restrict the simulator controls to an explicitly enabled loopback demo."""
+    state = request.app.state
+    if state.demo_nodes is None or request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(404, "Demo controls are unavailable")
+    return state
+
+
+@app.get("/demo/fleet")
+async def demo_fleet(request: Request) -> dict:
+    return {"nodes": demo_state(request).demo_nodes, "options": DEMO_NODE_COUNTS}
+
+
+@app.put("/demo/fleet")
+async def resize_fleet(request: Request, nodes: Annotated[int, Body(embed=True, strict=True)]) -> dict:
+    state = demo_state(request)
+    if nodes not in DEMO_NODE_COUNTS:
+        raise HTTPException(422, "Choose one of the supported demo fleet sizes")
+    state.demo_nodes = nodes
+    return {"nodes": nodes, "options": DEMO_NODE_COUNTS}
 
 
 @app.post("/telemetry", response_model=AssessmentBatch)

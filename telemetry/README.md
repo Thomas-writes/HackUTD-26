@@ -1,6 +1,6 @@
 # SSD telemetry and classification
 
-Each Linux collector sends per-drive metrics directly to FastAPI. The API summarizes the last 30 seconds for each SSD, runs the trained random forest, and sends the resulting JSON to a configurable SpacetimeDB reducer. The default interval is **one second**. The collector and simulator accept intervals down to 100 ms.
+Each Linux collector sends per-drive metrics directly to FastAPI. The API summarizes the last 30 seconds for each SSD, runs the trained random forest, and sends the resulting JSON to a configurable SpacetimeDB reducer. The collector defaults to one second between samples, and the fleet simulator defaults to three seconds. Both accept intervals down to 100 ms.
 
 ## Run it locally
 
@@ -11,20 +11,27 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python simulate.py --training-csv training.csv
-python train.py
+python train.py --data-source "Synthetic demo"
 python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 Use one API worker so each drive's rolling window lives in one process. The API loads the generated `model.joblib` at startup and groups concurrent windows into model calls over 10 ms. `TELEMETRY_MODEL_PATH` can point to another artifact created by `train.py`.
 
-In a second terminal with the environment active, run the 1,000-drive demo and inspect a node's live output.
+In a second terminal with the environment active, run the 1,000-node demo.
 
 ```sh
-python simulate.py --drives 1000 --drives-per-node 10 --interval 1 --seconds 40
+python simulate.py
+```
+
+Inspect a node in a separate terminal while the simulator runs.
+
+```sh
 curl -fsS http://127.0.0.1:8000/handoff/latest/sim-node-0000 | python -m json.tool
 ```
 
-That replays 100 logical nodes with ten SSDs each, targeting 1,000 readings per second. The simulator spreads their sampling clocks across each second. Add `--burst` to start all node clocks together, or set `--drives-per-node 1` for 1,000 individual senders and a higher request rate. The simulator skips a batch if its send time is already one interval late and reports that as a missed interval. Its report also includes accepted readings, failed and retried batches, and the 95th-percentile API round-trip time. Open `http://127.0.0.1:8000/docs` for the request and response schemas.
+The default fleet has 1,000 nodes with one SSD each and runs until interrupted. The simulator staggers each node's clock across the three-second interval. Per three seconds of eligible healthy operation, each node has about a 0.27% chance of starting heavy writes and a 0.03% chance of starting a drive fault. The simulator adjusts the per-sample odds for other intervals. An incident injects metrics for either a heavy-write workload or a drive fault for 30–60 seconds, followed by a 30-second healthy period. The model uses the same rolling window as it does for collector data, so the displayed status can lag a change in the injected metrics.
+
+Use `--nodes 1` for a walkthrough or `--nodes 10000` for a load test. The default interval increases with fleet size, reaching 12 seconds at 10,000 nodes. Use `--seconds 120` for a timed run, `--failure-chance 0` for a healthy baseline, or `--burst` to start all node clocks together. Use `--drives` and `--drives-per-node` to change the fleet size and number of SSDs per node. The simulator reports accepted readings, delivery failures, retries, missed intervals, and the recent 95th-percentile API round-trip time. Open `http://127.0.0.1:8000/docs` for the request and response schemas.
 
 On a Linux node, the collector discovers whole NVMe devices through `/proc/diskstats`. For a specific device, use its kernel name as listed there. Repeat `--device` for multiple drives. A test device mapped by `dm-delay` can be selected by its `dm-N` name.
 
@@ -38,7 +45,7 @@ For remote collectors, serve the intake through a reachable HTTPS endpoint and s
 
 - **`POST /telemetry`** accepts one node batch and returns the assessment document.
 - **`GET /handoff/latest/{node_id}`** shows the latest generated assessment in camelCase. Add **`?wire=true`** to see the exact HTTP body sent to SpacetimeDB. See [example-output.json](example-output.json).
-- **`GET /healthz`** shows the loaded model version and whether forwarding is configured.
+- **`GET /healthz`** shows the model version, forwarding status, and held-out accuracy with its dataset and sample size.
 
 When `SPACETIME_REDUCER_URL` is unset, FastAPI runs in preview mode. To enable forwarding, point it at the team's reducer URL and provide the service credential as `SPACETIME_TOKEN` when the reducer requires authentication.
 
@@ -61,13 +68,22 @@ curl -fsS 'http://127.0.0.1:8000/handoff/latest/sim-node-0000?wire=true' | pytho
 | `drives[]` | Latest raw readings and the classification for each drive in the node batch |
 | `volumes[]` | Optional filesystem capacity readings from explicitly configured mount paths |
 
-`classification` is `normal`, `likely_workload_contention`, `unexpected_slowdown` or `warming_up`. `warming_up` means fewer than three readings or under 29 seconds of observed coverage in the 30-second window. It has a null `modelScore`. Other scores are the model's class scores. `nextCheck` is a suggested first action. Read and write latency are null for intervals with zero completed operations of that type. SMART fields can also be null. The cumulative `mediaErrorsTotal` is a decimal string to preserve precision in JavaScript.
+`classification` is `healthy`, `heavy_writes`, `drive_fault` or `warming_up`. `warming_up` means fewer than three readings or under 29 seconds of observed coverage in the 30-second window. It has a null `modelScore`. Other scores are the model's class scores. `nextCheck` is a suggested first action. Read and write latency are null for intervals with zero completed operations of that type. SMART fields can also be null. The cumulative `mediaErrorsTotal` is a decimal string to preserve precision in JavaScript.
 
 The checked-in reducer keeps the latest assessment per `(nodeId, driveId)` in `ssd_status` and ignores repeated or older samples. An exact FastAPI retry reuses the same assessment. FastAPI returns `409` for stale input and `502` when configured reducer delivery fails. The preview endpoint shows the generated JSON even when delivery fails. [Run the connected dashboard](../my-spacetime-app/README.md)
 
 ## Train with another dataset
 
-`train.py --input path/to/labeled.csv` accepts the column names emitted by `simulate.py --training-csv`. Each row has `run_id`, `label`, `sample_time_ms`, `interval_ms`, and the snake_case fields in `DriveSample`. Use distinct run IDs for independent experiments. The trainer holds out entire runs for its report. The bundled generator supplies synthetic data for the demo, so the resulting scores measure performance on simulated runs. Use controlled storage experiments and labeled field data to evaluate hardware performance.
+`train.py --input path/to/labeled.csv` accepts the column names emitted by `simulate.py --training-csv`. Each row has `run_id`, `label`, `sample_time_ms`, `interval_ms`, and the snake_case fields in `DriveSample`. Use distinct run IDs for independent experiments. The trainer holds out entire runs for its report. The bundled generator supplies synthetic data for the demo, so the resulting scores measure performance on simulated runs. The dashboard displays held-out accuracy with the dataset name and number of windows. Expand it for balanced accuracy and per-class precision and recall. Use fault recall to track missed faults and fault precision to track false alerts. The bundled evaluation uses synthetic runs.
+
+For field evaluation, collect healthy and write-heavy runs under known workloads. Capture a drive-fault run only when you have independent evidence such as a verified device diagnostic or incident ticket. Keep all captures from the same physical drive under one run ID so its windows stay together in the evaluation split.
+
+```sh
+python agent.py --device nvme0n1 --training-csv field.csv --label healthy --run-id lab-drive-a
+python train.py --input field.csv --data-source "Labeled Linux SSD captures"
+```
+
+Record at least five independent groups per class with roughly a minute of usable telemetry per scenario. [Alibaba SSD SMART logs and failure tickets](https://github.com/shujiehan/ssdanalysis#readme) provide real fault evidence. [Microsoft Research block I/O traces](https://www.microsoft.com/en-us/research/people/dnarayan/more-information/) provide write-workload examples. These sources have different sampling intervals and measurement fields. The live classifier requires aligned I/O and SMART readings in its 30-second windows.
 
 | File | Responsibility |
 |---|---|
