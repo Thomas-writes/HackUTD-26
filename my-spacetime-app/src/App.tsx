@@ -410,7 +410,7 @@ export default function App() {
                 <path d="M4 14h16m-12 2.5h2m3 0h3" strokeLinecap="round" />
               </svg>
             </span>
-            <span>DriveWatch <small>Storage operations</small></span>
+            <span>WriteOrWrong <small>Storage operations</small></span>
           </div>
           <div className="connection" role="status">
             <span className={'connection-dot' + (live ? ' is-live' : '')} />
