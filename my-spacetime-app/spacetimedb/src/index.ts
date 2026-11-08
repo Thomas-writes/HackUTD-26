@@ -51,7 +51,8 @@ const spacetimedb = schema({
 export default spacetimedb;
 
 const classifications = new Set([
-  'normal', 'likely_workload_contention', 'unexpected_slowdown', 'warming_up',
+  'healthy', 'heavy_writes', 'drive_fault', 'warming_up',
+  'normal', 'likely_workload_contention', 'unexpected_slowdown',
 ]);
 
 /** Apply one typed FastAPI batch and keep the newest assessment per node and drive. */

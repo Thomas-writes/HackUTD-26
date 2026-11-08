@@ -12,9 +12,10 @@ Timestamp = Annotated[int, Field(gt=0, le=MAX_SAFE_INTEGER)]
 Interval = Annotated[int, Field(ge=100, le=60_000)]
 NonNegative = Annotated[float, Field(ge=0, le=1e12)]
 Classification = Literal[
-    "normal", "likely_workload_contention", "unexpected_slowdown", "warming_up"
+    "healthy", "heavy_writes", "drive_fault", "warming_up"
 ]
-MODEL_LABELS = ("normal", "likely_workload_contention", "unexpected_slowdown")
+DEMO_NODE_COUNTS = (1, 10, 100, 500, 1_000, 2_500, 5_000, 10_000)
+MODEL_LABELS = ("healthy", "heavy_writes", "drive_fault")
 
 
 class WireModel(BaseModel):

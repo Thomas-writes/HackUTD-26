@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import csv
 import json
 import logging
 import math
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import httpx
 
-from schemas import MAX_SAFE_INTEGER, DriveSample, TelemetryBatch, VolumeSample
+from schemas import MAX_SAFE_INTEGER, MODEL_LABELS, DriveSample, TelemetryBatch, VolumeSample
 
 LOGGER = logging.getLogger("ssd-agent")
 WHOLE_NVME_DEVICE = re.compile(r"nvme[0-9]+n[0-9]+$")
@@ -145,7 +146,7 @@ async def send_batches(queue: asyncio.Queue[TelemetryBatch], url: str, token: st
                     await asyncio.sleep(0.1)
 
 
-async def collect(args: argparse.Namespace) -> None:
+async def collect(args: argparse.Namespace, recording: csv.DictWriter | None = None) -> None:
     """Sample configured Linux devices on a fixed clock and enqueue each node batch for delivery."""
     loop = asyncio.get_running_loop()
     previous = read_diskstats()
@@ -193,6 +194,12 @@ async def collect(args: argparse.Namespace) -> None:
                     node_id=args.node_id, sample_time_ms=clock_offset + round(now * 1_000),
                     interval_ms=elapsed_ms, drives=drives, volumes=read_volumes(args.mount),
                 )
+                if recording is not None:
+                    recording.writerows({
+                        "run_id": args.run_id, "label": args.label,
+                        "sample_time_ms": batch.sample_time_ms, "interval_ms": batch.interval_ms,
+                        **drive.model_dump(),
+                    } for drive in batch.drives)
                 if pending.full():
                     dropped = pending.get_nowait()
                     LOGGER.warning("Collector falling behind. Dropped batch at %s", dropped.sample_time_ms)
@@ -220,15 +227,29 @@ def main() -> None:
     parser.add_argument("--mount", action="append", default=[], help="Filesystem path to check for free space")
     parser.add_argument("--interval", type=float, default=1.0, help="Seconds between metric snapshots")
     parser.add_argument("--smart-interval", type=float, default=30, help="Seconds between SMART checks, 0 disables")
+    parser.add_argument("--training-csv", type=Path, help="Append measured telemetry to a labeled training CSV")
+    parser.add_argument("--label", choices=MODEL_LABELS, help="Ground truth for this controlled run")
+    parser.add_argument("--run-id", help="Independent run or drive identifier for evaluation splitting")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if not 0.1 <= args.interval <= 60 or not (math.isfinite(args.smart_interval) and args.smart_interval >= 0):
         parser.error("Use an interval from 0.1 to 60 seconds and a nonnegative SMART interval")
     if len(set(args.device)) != len(args.device) or any("/" in name for name in args.device):
         parser.error("Pass distinct kernel device names such as nvme0n1 or dm-0")
+    recording_options = (args.training_csv, args.label, args.run_id)
+    if any(recording_options) and not all(recording_options):
+        parser.error("Supply --training-csv, --label, and --run-id together")
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
     try:
-        asyncio.run(collect(args))
+        if args.training_csv is None:
+            asyncio.run(collect(args))
+        else:
+            fields = ["run_id", "label", "sample_time_ms", "interval_ms", *DriveSample.model_fields]
+            with args.training_csv.open("a", newline="", encoding="utf-8", buffering=1) as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                if stream.tell() == 0:
+                    writer.writeheader()
+                asyncio.run(collect(args, writer))
     except KeyboardInterrupt:
         LOGGER.info("Collector stopped")
     except (OSError, ValueError) as exc:

@@ -1,5 +1,6 @@
 """Shared rolling-window calculations for offline training and inference."""
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Iterable
@@ -11,7 +12,12 @@ MIN_COVERED_MS = 29_000
 RATE_FIELDS = (
     "read_iops", "write_iops", "read_mib_per_sec", "write_mib_per_sec", "queue_depth"
 )
-FEATURE_NAMES = (*RATE_FIELDS, "read_latency_ms", "write_latency_ms", "write_rate_change")
+# NVMe critical-warning bits for low spare capacity, degraded reliability, and read-only media.
+MEDIA_WARNING_BITS = 0x0D
+FEATURE_NAMES = (
+    *RATE_FIELDS, "read_latency_ms", "write_latency_ms", "write_rate_change",
+    "write_share", "smart_media_warning", "media_error_increase",
+)
 
 
 @dataclass(frozen=True)
@@ -79,12 +85,24 @@ def summarize(history: Iterable[TimedSample], cutoff: int) -> Window:
         for field in RATE_FIELDS
     )
     write_change = intervals[-1][0].write_mib_per_sec - intervals[0][0].write_mib_per_sec
+    read_rate, write_rate = rates[2:4]
+    throughput = read_rate + write_rate
+    media_warning = any(
+        (drive.smart_critical_warning or 0) & MEDIA_WARNING_BITS for drive, _ in intervals
+    )
+    error_counts = [
+        int(drive.media_errors_total) for drive, _ in intervals if drive.media_errors_total is not None
+    ]
+    error_increase = max(0, error_counts[-1] - error_counts[0]) if error_counts else 0
     return Window(
         (
             *rates,
             mean_latency(intervals, "read_latency_ms", "read_iops"),
             mean_latency(intervals, "write_latency_ms", "write_iops"),
             write_change,
+            write_rate / throughput if throughput else 0.0,
+            float(media_warning),
+            math.log1p(error_increase),
         ),
         len(intervals),
         covered,
