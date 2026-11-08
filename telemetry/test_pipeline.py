@@ -9,9 +9,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import aiohttp
 import joblib
 import numpy as np
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 from sklearn.ensemble import RandomForestClassifier
 
@@ -95,7 +97,7 @@ class PipelineTests(unittest.TestCase):
             "TELEMETRY_MODEL_PATH": str(self.model_path), "TELEMETRY_NODE_TOKENS": "",
             "SPACETIME_REDUCER_URL": "https://example.test/v1/database/test/call/ingest_ssd_batch",
         }
-        sender = AsyncMock(side_effect=[httpx.ConnectError("offline"), None])
+        sender = AsyncMock(side_effect=[aiohttp.ClientConnectionError("offline"), None])
         with patch.dict(os.environ, environment), patch("app.send_to_spacetime", sender), TestClient(app) as client:
             body = batch_at(1_000).model_dump(by_alias=True)
             self.assertEqual(client.post("/telemetry", json=body).status_code, 502)
@@ -121,17 +123,19 @@ class ReducerTests(unittest.IsolatedAsyncioTestCase):
             model_version="test", drives=[], volumes=[],
         )
 
-        def reducer(request: httpx.Request) -> httpx.Response:
+        async def reducer(request: web.Request) -> web.Response:
             """Check the request wire shape and return a simulated successful delivery."""
             self.assertEqual(request.method, "POST")
             self.assertEqual(request.headers["authorization"], "Bearer test-secret")
-            args = json.loads(request.content)
+            args = await request.json()
             self.assertEqual(len(args), 1)
             self.assertEqual(json.loads(args[0]), output.model_dump(by_alias=True))
-            return httpx.Response(200)
+            return web.Response()
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(reducer)) as client:
-            await send_to_spacetime(client, "https://example.test/call/test", "test-secret", output)
+        receiver = web.Application()
+        receiver.router.add_post("/call/test", reducer)
+        async with TestServer(receiver) as server, aiohttp.ClientSession() as client:
+            await send_to_spacetime(client, str(server.make_url("/call/test")), "test-secret", output)
 
 
 if __name__ == "__main__":

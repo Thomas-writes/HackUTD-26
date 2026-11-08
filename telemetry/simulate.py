@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpx
+import aiohttp
 
 from schemas import MODEL_LABELS, DriveSample, TelemetryBatch
 
@@ -78,34 +78,38 @@ def write_training_csv(path: Path, runs_per_class: int, seed: int) -> None:
 
 
 async def post_batch(
-    client: httpx.AsyncClient, url: str, batch: TelemetryBatch, token: str | None
+    client: aiohttp.ClientSession, url: str, batch: TelemetryBatch, token: str | None
 ) -> tuple[float, Counter[str], str | None, int]:
     """Submit one node batch and report its timing, class counts, error and any retry."""
     start = time.perf_counter()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     body = batch.model_dump(by_alias=True)
+    retry = 0
     try:
-        retry = 0
-        try:
-            response = await client.post(url, json=body, headers=headers)
-            response.raise_for_status()
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
-                raise
-            retry = 1
-            await asyncio.sleep(0.05)
-            response = await client.post(url, json=body, headers=headers)
-            response.raise_for_status()
-        labels = Counter(drive["classification"] for drive in response.json()["drives"])
+        for attempt in range(2):
+            try:
+                async with client.post(url, json=body, headers=headers, allow_redirects=False) as response:
+                    if not 200 <= response.status < 300:
+                        raise aiohttp.ClientResponseError(
+                            response.request_info, response.history, status=response.status
+                        )
+                    result = await response.json()
+                break
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                if attempt or (isinstance(exc, aiohttp.ClientResponseError) and exc.status < 500):
+                    raise
+                retry = 1
+                await asyncio.sleep(0.05)
+        labels = Counter(drive["classification"] for drive in result["drives"])
         if sum(labels.values()) != len(batch.drives):
             raise ValueError("Response count differs from the submitted drive count")
         return (time.perf_counter() - start) * 1_000, labels, None, retry
-    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+    except (aiohttp.ClientError, TimeoutError, KeyError, TypeError, ValueError) as exc:
         return (time.perf_counter() - start) * 1_000, Counter(), f"{type(exc).__name__}: {exc}", retry
 
 
 async def replay_node(
-    client: httpx.AsyncClient, args: argparse.Namespace, index: int, drives: list[DriveProfile],
+    client: aiohttp.ClientSession, args: argparse.Namespace, index: int, drives: list[DriveProfile],
     start: float, epoch_ms: int, phase: float,
 ) -> ReplayStats:
     """Replay one independently timed node and return its observed delivery statistics."""
@@ -154,8 +158,9 @@ async def replay(args: argparse.Namespace) -> int:
     failures = retries = missed = 0
     first_error = None
     loop = asyncio.get_running_loop()
-    limits = httpx.Limits(max_connections=200, max_keepalive_connections=200)
-    async with httpx.AsyncClient(timeout=15, limits=limits) as client:
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=200), timeout=aiohttp.ClientTimeout(total=15)
+    ) as client:
         start = loop.time()
         initial_sample_time = time.time_ns() // 1_000_000
         results = await asyncio.gather(*(

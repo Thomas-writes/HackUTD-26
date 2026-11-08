@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-import httpx
+import aiohttp
 import joblib
 import numpy as np
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -167,12 +167,14 @@ def reducer_args(batch: AssessmentBatch) -> list[str]:
 
 
 async def send_to_spacetime(
-    client: httpx.AsyncClient, url: str, token: str | None, batch: AssessmentBatch
+    client: aiohttp.ClientSession, url: str, token: str | None, batch: AssessmentBatch
 ) -> None:
     """Post one assessment batch to the configured reducer and raise if delivery fails."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    response = await client.post(url, headers=headers, json=reducer_args(batch))
-    response.raise_for_status()
+    async with client.post(url, headers=headers, json=reducer_args(batch), allow_redirects=False) as response:
+        if not 200 <= response.status < 300:
+            raise aiohttp.ClientResponseError(response.request_info, response.history, status=response.status)
+        await response.read()
 
 
 @asynccontextmanager
@@ -183,7 +185,7 @@ async def lifespan(app: FastAPI):
     app.state.node_tokens = node_tokens(os.environ.get("TELEMETRY_NODE_TOKENS"))
     app.state.reducer_url = os.environ.get("SPACETIME_REDUCER_URL")
     app.state.reducer_token = os.environ.get("SPACETIME_TOKEN")
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as client:
         app.state.http = client
         yield
 
@@ -212,8 +214,8 @@ async def ingest(
     if state.reducer_url:
         try:
             await send_to_spacetime(state.http, state.reducer_url, state.reducer_token, result)
-        except httpx.HTTPError as exc:
-            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else "network"
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            status = exc.status if isinstance(exc, aiohttp.ClientResponseError) else "network"
             LOGGER.warning("SpacetimeDB rejected or missed batch for %s (%s)", batch.node_id, status)
             raise HTTPException(502, "SpacetimeDB delivery failed. Retry the same batch.") from exc
     return result
