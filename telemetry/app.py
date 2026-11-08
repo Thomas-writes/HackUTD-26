@@ -224,6 +224,7 @@ def demo_state(request: Request):
 
 
 @app.get("/demo/fleet")
+@app.get("/demo/fleet-size")
 async def demo_fleet(request: Request) -> dict:
     return {"nodes": demo_state(request).demo_nodes, "options": DEMO_NODE_COUNTS}
 

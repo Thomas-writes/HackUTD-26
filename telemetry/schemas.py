@@ -33,11 +33,10 @@ Classification = Literal[
     "healthy", "heavy_writes", "drive_fault", "warming_up"
 ]
 DEMO_NODE_COUNTS = (1, 10, 100, 500, 1_000, 2_500, 5_000, 10_000)
-MODEL_LABELS = ("healthy", "heavy_writes", "drive_fault")
 #Labels the ML model itself can output
 #"warming_up" is excluded because it means "not enough data yet"
 #which is decided outside the model
-MODEL_LABELS = ("normal", "likely_workload_contention", "unexpected_slowdown")
+MODEL_LABELS = ("healthy", "heavy_writes", "drive_fault")
 
 #Base class for every model in this file
 #Applies one shared set of settings so all payloads follow

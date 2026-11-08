@@ -1,17 +1,10 @@
-# DriveWatch
+# WriteOrWrong
 
-DriveWatch monitors SSDs, classifies their recent behavior, and shows the results on a live fleet dashboard. The simulator lets you run the same pipeline without Linux storage hardware. Green indicates **Healthy**, yellow indicates **Heavy writes**, and red indicates a **suspected drive fault**.
+WriteOrWrong helps operators understand what is happening across a fleet of SSDs. It collects live measurements from Linux drives or a simulator, then uses a trained random forest to distinguish healthy operation, heavy writes, and suspected drive faults. SpacetimeDB streams those assessments to a React dashboard, where operators can follow fleet trends, inspect individual drives, and see what to check first. The simulator can replay up to 10,000 nodes for demos and load testing.
 
 ```text
 Synthetic simulator or Linux collector → FastAPI + random forest → SpacetimeDB → React dashboard
 ```
-
-## Current checkout
-
-Two issues affect a fresh run of this revision.
-
-- [`telemetry/schemas.py`](telemetry/schemas.py) assigns `MODEL_LABELS` twice. The second assignment restores three old labels. The bundled training CSV starts with `healthy`, which the trainer rejects, and the API rejects a model artifact trained with the current labels. Keep the `healthy`, `heavy_writes`, and `drive_fault` assignment and remove the obsolete one before running the classifier.
-- The local `dev.py` and `scripts/dev.py` drafts define prerequisite and setup helpers. They have no command entry point. Running either with `--help`, `doctor`, or `status` exits silently. Use the manual workflow below once the label contract is consistent.
 
 ## Tech stack
 
@@ -26,7 +19,7 @@ Two issues affect a fresh run of this revision.
 
 ## Run locally
 
-Install Python 3.12, npm, a Node.js version allowed by [`my-spacetime-app/package.json`](my-spacetime-app/package.json), and the [SpacetimeDB CLI 2.14](https://spacetimedb.com/install). The simulator works on macOS and Linux. The real collector requires Linux and access to `/proc/diskstats`. Start each numbered section in a separate terminal from the repository root. Commands assume the label issue described above has been resolved.
+Install Python 3.12, npm, a Node.js version allowed by [`my-spacetime-app/package.json`](my-spacetime-app/package.json), and the [SpacetimeDB CLI 2.14](https://spacetimedb.com/install). The simulator works on macOS and Linux. The real collector requires Linux and access to `/proc/diskstats`. Start each numbered section in a separate terminal from the repository root.
 
 ### 1. Start the local database
 
@@ -61,7 +54,7 @@ SPACETIME_REDUCER_URL=http://127.0.0.1:3000/v1/database/ssd-monitor/call/ingest_
   python -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-The repository already contains `telemetry/training.csv`. To generate another synthetic dataset, run `python simulate.py --training-csv /tmp/drivewatch-training.csv` and pass that path to `train.py --input`. The trainer writes `model.joblib` locally. Set `TELEMETRY_MODEL_PATH` before starting FastAPI to load a different trusted artifact. Keep one API worker because the recent samples and exact-retry cache live in process memory. Vite proxies the demo controls and evaluation to port 8000. Reuse the artifact on later starts unless the model inputs, labels, or dataset change.
+The repository already contains `telemetry/training.csv`. To generate another synthetic dataset, run `python simulate.py --training-csv /tmp/writeorwrong-training.csv` and pass that path to `train.py --input`. The trainer writes `model.joblib` locally. Set `TELEMETRY_MODEL_PATH` before starting FastAPI to load a different trusted artifact. Keep one API worker because the recent samples and exact-retry cache live in process memory. Vite proxies the demo controls and evaluation to port 8000. Reuse the artifact on later starts unless the model inputs, labels, or dataset change.
 
 ### 4. Start the simulator
 
@@ -71,13 +64,13 @@ cd telemetry
 python simulate.py --dashboard-control
 ```
 
-Open the [dashboard](http://127.0.0.1:5173/). Choose 1, 10, 100, 500, 1,000, 2,500, 5,000, or 10,000 in **Simulated nodes**. That selection changes how many nodes send measurements. The chart starts a new history after a resize. Each simulated node has one SSD in this mode. Reports arrive about every 3–12 seconds depending on fleet size, and the classifier usually needs about 30 seconds of telemetry.
+Once Vite starts, copy its local URL from the terminal into your browser. Choose 1, 10, 100, 500, 1,000, 2,500, 5,000, or 10,000 in **Simulated nodes**. That selection changes how many nodes send measurements. The chart starts a new history after a resize. Each simulated node has one SSD in this mode. Reports arrive about every 3–12 seconds depending on fleet size, and the classifier usually needs about 30 seconds of telemetry.
 
 Use `python simulate.py --nodes 1` for fixed-size replay, `--seconds 120` for a timed run, or `--failure-chance 0` for an incident-free workload. Fixed-size mode also accepts `--drives` and `--drives-per-node`. The default simulator starts heavy writes with about 0.27% probability and a fault with about 0.03% probability per eligible healthy three seconds. Those are incident start probabilities. Incidents last roughly 30–60 seconds, so a snapshot can show a larger share of affected drives. Press Ctrl+C in each terminal to stop its process.
 
 ### Preview and diagnose
 
-For a Python-only run, train as above and start Uvicorn without `SPACETIME_REDUCER_URL`. Run the simulator with `--nodes 1`. FastAPI will return assessments directly in [its API docs](http://127.0.0.1:8000/docs) and through these commands.
+For a Python-only run, train as above and start Uvicorn without `SPACETIME_REDUCER_URL`. Run the simulator with `--nodes 1`. FastAPI serves interactive docs at `/docs`. Use these commands to inspect a simulated node.
 
 ```sh
 curl -fsS http://127.0.0.1:8000/healthz | python3 -m json.tool
@@ -91,6 +84,16 @@ curl -fsS http://127.0.0.1:8000/handoff/latest/sim-node-0000 | python3 -m json.t
 - **Port conflict** — Check which process is listening before stopping anything. The current web proxy expects FastAPI on port 8000.
 
 For a secured deployment, the collector can send a `TELEMETRY_TOKEN` and the API can validate it with `TELEMETRY_NODE_TOKENS`, a JSON map of node IDs to bearer tokens. Use HTTPS for remote collection. If the database requires a designated writer, publish with `SSD_WRITER_IDENTITY` and set its matching `SPACETIME_TOKEN` in the API environment. The dashboard reads the public `ssd_status` table. Keep writer credentials on the server.
+
+## Share the demo on a phone
+
+Install [cloudflared](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/), install the Node dependencies, and prepare the Python environment and model as shown above. Then run this from the repository root.
+
+```sh
+python3.12 dev.py
+```
+
+The script starts SpacetimeDB, FastAPI, and the simulator with 1,000 nodes. Open the local dashboard URL printed by the launcher to change the fleet size using **Simulated nodes**. The single `trycloudflare.com` link opens a viewing dashboard with no fleet controls. Both dashboards receive the same telemetry. Press Ctrl+C to stop the run.
 
 ## How the model learns and classifies
 
@@ -167,7 +170,6 @@ For ordinary monitoring, omit the CSV, label, and run ID options. Repeat `--devi
 | [`telemetry/training.csv`](telemetry/training.csv), [`field.csv`](telemetry/field.csv) | Bundled synthetic samples and a header-only capture template, respectively. |
 | [`telemetry/example-output.json`](telemetry/example-output.json) | Example assessment shape from an older model. Use the live preview for current labels. |
 | `telemetry/model.joblib`, `telemetry/.venv/` | Local trained model and Python environment. |
-| `dev.py`, `scripts/dev.py` | Incomplete local launcher drafts observed during verification. They are untracked and the manual run does not require them. |
 
 ### Web and database
 
@@ -204,5 +206,3 @@ Track the evidence, action, timestamp, affected device, pre/post measurements, a
 ## Verification
 
 Run the telemetry suite with `cd telemetry && .venv/bin/python -m unittest -v`. From `my-spacetime-app`, run `npm test -- --run` for web tests and `npm run build` for TypeScript and production bundling.
-
-On the checkout reviewed for this README, **five of six Python tests passed**. `test_live_response_and_retry` failed after warm-up with an obsolete class in the API. Training from the checked-in CSV and loading the existing model also failed on the label mismatch described above. In a temporary copy with only the obsolete assignment removed, the trainer reproduced the synthetic scores above, the model loaded, and all six tests passed. The temporary FastAPI service also accepted a one-node simulator run and returned the expected initial warming-up assessment. The two launcher drafts parsed and exited silently when invoked. The manual SpacetimeDB and web startup were reviewed without publishing or restarting the existing services.
