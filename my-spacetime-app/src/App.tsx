@@ -320,6 +320,7 @@ export default function App() {
   const [demoFleet, setDemoFleet] = useState<DemoFleet>();
   const [resizing, setResizing] = useState(false);
   const [resizeError, setResizeError] = useState(false);
+  const [correctiveAlgorithm, setCorrectiveAlgorithm] = useState(false);
   const targetNodes = demoFleet?.nodes;
 
   useEffect(() => {
@@ -412,10 +413,18 @@ export default function App() {
             </span>
             <span>WriteOrWrong <small>Storage operations</small></span>
           </div>
-          <div className="connection" role="status">
-            <span className={'connection-dot' + (live ? ' is-live' : '')} />
-            {connectionLabel}
-          </div>
+
+    <div className="topbar-actions">
+      <button type="button" className="connection topbar-button"
+        aria-pressed={correctiveAlgorithm} onClick={() => setCorrectiveAlgorithm(on => !on)}>
+        Corrective Algorithm {correctiveAlgorithm ? 'on' : 'off'}
+      </button>
+      <div className="connection" role="status">
+        <span className={'connection-dot' + (live ? ' is-live' : '')} />
+        {connectionLabel}
+      </div>
+    </div>
+
         </div>
       </header>
 
