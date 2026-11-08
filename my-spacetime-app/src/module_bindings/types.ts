@@ -8,9 +8,78 @@ import {
   t as __t,
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
-} from 'spacetimedb';
+} from "spacetimedb";
 
-export const Person = __t.object('Person', {
+export const Person = __t.object("Person", {
   name: __t.string(),
 });
 export type Person = __Infer<typeof Person>;
+
+export const SsdAssessment = __t.object("SsdAssessment", {
+  driveId: __t.string(),
+  device: __t.string(),
+  readIops: __t.f64(),
+  writeIops: __t.f64(),
+  readMibPerSec: __t.f64(),
+  writeMibPerSec: __t.f64(),
+  readLatencyMs: __t.option(__t.f64()),
+  writeLatencyMs: __t.option(__t.f64()),
+  queueDepth: __t.f64(),
+  inFlight: __t.u64(),
+  smartCriticalWarning: __t.option(__t.u8()),
+  mediaErrorsTotal: __t.option(__t.string()),
+  classification: __t.string(),
+  modelScore: __t.option(__t.f64()),
+  windowSamples: __t.u32(),
+  windowCoveredMs: __t.u32(),
+  nextCheck: __t.string(),
+});
+export type SsdAssessment = __Infer<typeof SsdAssessment>;
+
+export const SsdBatch = __t.object("SsdBatch", {
+  schemaVersion: __t.u8(),
+  nodeId: __t.string(),
+  sampleTimeMs: __t.u64(),
+  intervalMs: __t.u32(),
+  modelVersion: __t.string(),
+  get drives() {
+    return __t.array(SsdAssessment);
+  },
+  get volumes() {
+    return __t.array(VolumeCapacity);
+  },
+});
+export type SsdBatch = __Infer<typeof SsdBatch>;
+
+export const SsdStatus = __t.object("SsdStatus", {
+  id: __t.string(),
+  nodeId: __t.string(),
+  sampleTimeMs: __t.u64(),
+  intervalMs: __t.u32(),
+  modelVersion: __t.string(),
+  driveId: __t.string(),
+  device: __t.string(),
+  readIops: __t.f64(),
+  writeIops: __t.f64(),
+  readMibPerSec: __t.f64(),
+  writeMibPerSec: __t.f64(),
+  readLatencyMs: __t.option(__t.f64()),
+  writeLatencyMs: __t.option(__t.f64()),
+  queueDepth: __t.f64(),
+  inFlight: __t.u64(),
+  smartCriticalWarning: __t.option(__t.u8()),
+  mediaErrorsTotal: __t.option(__t.string()),
+  classification: __t.string(),
+  modelScore: __t.option(__t.f64()),
+  windowSamples: __t.u32(),
+  windowCoveredMs: __t.u32(),
+  nextCheck: __t.string(),
+});
+export type SsdStatus = __Infer<typeof SsdStatus>;
+
+export const VolumeCapacity = __t.object("VolumeCapacity", {
+  mountPath: __t.string(),
+  availableBytes: __t.u64(),
+  totalBytes: __t.u64(),
+});
+export type VolumeCapacity = __Infer<typeof VolumeCapacity>;
