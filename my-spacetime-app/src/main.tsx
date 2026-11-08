@@ -5,7 +5,8 @@ import { Identity } from 'spacetimedb';
 import { SpacetimeDBProvider } from 'spacetimedb/react';
 import { DbConnection, ErrorContext } from './module_bindings/index.ts';
 
-const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://127.0.0.1:3000';
+//const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://127.0.0.1:3000';
+const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 const DB_NAME = import.meta.env.VITE_SPACETIMEDB_DB_NAME ?? 'ssd-monitor';
 const TOKEN_KEY = `${HOST}/${DB_NAME}/auth_token`;
 

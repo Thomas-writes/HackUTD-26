@@ -31,5 +31,10 @@ export default defineConfig({
     },
   },
   test: { environment: 'node' }, // DOM-specific files opt in to jsdom below
-  preview: { allowedHosts: true }
+  preview: { 
+    allowedHosts: true, 
+    proxy: {
+        '/v1': { target: 'http://127.0.0.1:3000', ws: true, changeOrigin: true }
+      }
+  }
 });
