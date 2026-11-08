@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "nodeId": "sim-node-0000",
+  "sampleTimeMs": 1794100029000,
+  "intervalMs": 1000,
+  "modelVersion": "ssd-rf-v1",
+  "drives": [
+    {
+      "driveId": "ssd-0001",
+      "device": "nvme0n1",
+      "readIops": 6200.0,
+      "writeIops": 8700.0,
+      "readMibPerSec": 48.0,
+      "writeMibPerSec": 420.0,
+      "readLatencyMs": 11.2,
+      "writeLatencyMs": 8.5,
+      "queueDepth": 13.2,
+      "inFlight": 12,
+      "smartCriticalWarning": 0,
+      "mediaErrorsTotal": "0",
+      "classification": "likely_workload_contention",
+      "modelScore": 0.6869335685294194,
+      "windowSamples": 30,
+      "windowCoveredMs": 30000,
+      "nextCheck": "Check the write-heavy job. Cap it and see if latency recovers."
+    }
+  ],
+  "volumes": []
+}
